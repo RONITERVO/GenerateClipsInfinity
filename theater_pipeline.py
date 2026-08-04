@@ -795,6 +795,11 @@ class TheaterManager:
             "Treat persistent rules as active world constraints. Integrate directions causally while preserving the "
             "fixed premise contract, established identity and continuity, safety, and grounded factual limits.\n"
         )
+        if state.get("config", {}).get("mode") == "dream":
+            prompt += (
+                "In this dream, interpret each direction as an associative intrusion: transform its imagery into the "
+                "invented world instead of explaining it, researching it, or treating it as a factual claim.\n"
+            )
         return prompt, [item["id"] for item in selected]
 
     def _log_live_directive(self, state: dict[str, Any], event: dict[str, Any]) -> None:
@@ -985,6 +990,15 @@ class TheaterManager:
         mode = config.get("mode", "edutainment")
         language = config.get("language", "en")
         language_name = self.LANGUAGE_NAMES.get(language, language)
+        dream_contract = (
+            " This is an invented dream, not a factual account, lesson, simulation, or explanation. Treat the user's "
+            "seed as a faint associative spark rather than a binding request: do not define it, explain it, research it, "
+            "or repeatedly name it. Invent every person, place, object, history, rule and relationship. If the seed names "
+            "something real, transform it into an original fictional image without making claims about the real thing. "
+            "Use legible dream logic: sensory motifs and identities may metamorphose through meaningful association, "
+            "while each individual scene remains visually coherent. Never announce that this is a dream."
+            if mode == "dream" else ""
+        )
         interactive_contract = (
             " This is an interactive character show with one stable primary on-screen host. Keep the host's identity, "
             "appearance, voice, relationships, setting and ongoing activity consistent. Narration is primarily the "
@@ -994,23 +1008,36 @@ class TheaterManager:
             "never claim to see, hear or monitor the viewer."
             if mode == "interactive" else ""
         )
+        continuity_contract = (
+            "Maintain evolving associative continuity, recurring sensory motifs, and enough local identity for the next "
+            "scene to feel connected, but allow deliberate impossible transformations. Every scene must change the "
+            "situation and use a new action, composition and sensory motif. "
+            if mode == "dream" else
+            "Maintain strict causal continuity, stable identities, geography, wardrobe, tone and facts. Every scene must "
+            "change the situation and use a new action, composition and sensory motif. Treat the user's seed as a binding "
+            "premise contract. Preserve every explicit character count, named role, required object, action, event and "
+            "setting. Never delay, remove, reverse or contradict an explicit premise event through an invented continuity "
+            "rule. Explicit premise requirements outrank stylistic invention. "
+        )
+        grounding_contract = (
+            "In educational modes, use only factual claims directly supported by the supplied offline encyclopedia "
+            "excerpts; omit any unsupported causal explanation. Educational facts must be correct, woven into action, "
+            "and never presented as medical, legal or safety-critical advice. "
+            if self.uses_grounding(config) else ""
+        )
         return (
             "You are the resident writer for a completely offline, endless audiovisual story theater. "
             f"MANDATORY OUTPUT LANGUAGE: {language_name} [{language}]. Every natural-language JSON string value, "
             "including titles, names, roles, descriptions, beats, narration, actions and summaries, must be written "
             f"only in {language_name}. Do not translate the user's story into English. Keep JSON keys in English. "
-            "Return only valid JSON. Maintain strict causal continuity, stable identities, geography, wardrobe, "
-            "tone and facts. Every scene must change the situation and use a new action, composition and sensory motif. "
-            "Treat the user's seed as a binding premise contract. Preserve every explicit character count, named role, "
-            "required object, action, event and setting. Never delay, remove, reverse or contradict an explicit premise "
-            "event through an invented continuity rule. Explicit premise requirements outrank stylistic invention. "
+            "Return only valid JSON. "
+            f"{continuity_contract}"
             "Never recap at length, reset the plot, reuse an earlier event, or end the story. Keep it family-safe, "
-            f"appropriate for audience={age}, and mode={mode}. In educational modes, use only factual claims "
-            "directly supported by the supplied offline encyclopedia excerpts; omit any unsupported causal explanation. "
-            "Educational facts must be correct, woven into action, "
-            "and never presented as medical, legal or safety-critical advice. Narration must be natural spoken prose. "
+            f"appropriate for audience={age}, and mode={mode}. "
+            f"{grounding_contract}"
+            "Narration must be natural spoken prose. "
             "Use complete sentences separated by spaces and avoid abbreviations that end in a period."
-            f"{interactive_contract}"
+            f"{interactive_contract}{dream_contract}"
         )
 
     def _translation_system_prompt(self, config: dict[str, Any]) -> str:
@@ -1227,6 +1254,7 @@ class TheaterManager:
 
     async def _bootstrap(self, state: dict[str, Any]) -> dict[str, Any]:
         config = state["config"]
+        dream = config.get("mode") == "dream"
         language_name = self.LANGUAGE_NAMES.get(config.get("language", "en"), config.get("language", "en"))
         minimum_words, maximum_words = self.narration_word_limits(config)
         opening_maximum = min(maximum_words, minimum_words + 80)
@@ -1242,14 +1270,35 @@ class TheaterManager:
             "clear that viewers can chat or influence later moments. Keep narration in the host's first-person voice.\n"
             if config.get("mode") == "interactive" else ""
         )
-        request = (
-            f"Create an endless story from this seed: {config['prompt']}\n"
-            f"Write every natural-language value only in {language_name}; English is forbidden except for JSON keys.\n"
-            f"Learning focus: {config.get('learning_focus') or 'none; prioritize entertainment'}.\n"
+        seed_opening = (
+            f"Create an endless invented dream loosely associated with this pre-sleep cue: {config['prompt']}\n"
+            if dream else f"Create an endless story from this seed: {config['prompt']}\n"
+        )
+        seed_contract = (
+            "The cue is deliberately minimal and has no non-negotiable literal requirements. Invent the dreamer or "
+            "recurring figures, world, visual style, sensory motifs and immediate situation. Do not explain, define, "
+            "quote or repeatedly name the cue. Start in the middle of an intriguing image without announcing a dream. "
+            "Use premise_contract for a few broad invented dream motifs and transformation rules, never factual claims "
+            "or a literal restatement of the cue.\n"
+            if dream else
             "First extract the seed's non-negotiable requirements into premise_contract. Scene 1 must visibly establish "
             "every explicitly requested main character and the immediate central situation or threat. Do not add a rule "
             "that postpones something the seed says is already happening. Give every recurring character a stable name, "
             "role and visual appearance.\n"
+        )
+        learning_instruction = (
+            "" if dream else
+            f"Learning focus: {config.get('learning_focus') or 'none; prioritize entertainment'}.\n"
+        )
+        grounding_block = (
+            "\n\nOFFLINE ENCYCLOPEDIA EXCERPTS — these are the only allowed basis for real-world claims:\n"
+            f"{self._grounding_text(state)}"
+            if self.uses_grounding(config) else ""
+        )
+        request = (
+            f"{seed_opening}"
+            f"Write every natural-language value only in {language_name}; English is forbidden except for JSON keys.\n"
+            f"{learning_instruction}{seed_contract}"
             f"{interactive_opening}"
             f"Write {minimum_words}-{opening_maximum} narration words for scene 1. This is a hard playback-duration "
             f"budget; use exactly {opening_sentences} complete sentences with {opening_sentence_minimum}-"
@@ -1258,7 +1307,7 @@ class TheaterManager:
             "continuity_rules:[...]},"
             "story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}}. "
             "visual_action must contain one filmable action and no visible text."
-            f"\n\nOFFLINE ENCYCLOPEDIA EXCERPTS — these are the only allowed basis for real-world claims:\n{self._grounding_text(state)}"
+            f"{grounding_block}"
         )
         content, metrics = await self.writer.complete([
             {"role": "system", "content": self._system_prompt(config)},
@@ -1285,7 +1334,19 @@ class TheaterManager:
                 "The host never claims real-time sight, hearing, monitoring, or immediate response.",
                 "Without a viewer message, the host continues the established activity and open-ended show.",
             ]
+        elif dream:
+            bible["experience"] = "dream"
+            bible["seed_role"] = "weak_association"
+            bible["premise_contract"] = [
+                "The initial cue is only a weak association, never a factual topic or literal requirement.",
+                "All people, places, objects, histories and explanations are invented inside this dream.",
+                "Recurring motifs may transform through dream logic while each individual scene stays visually coherent.",
+            ]
         value["scene"] = self._scene_object(value["scene"], "bootstrap")
+        if dream:
+            value["scene"]["learning_point"] = ""
+            value["scene"].pop("sources", None)
+            value["scene"].pop("fact_basis", None)
         value["scene"]["planner_metrics"] = dict(metrics)
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
         return value
@@ -1534,6 +1595,7 @@ class TheaterManager:
     async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
         planning_context_before = self._planning_context_snapshot(state)
         steering_prompt, live_directive_ids = self._steering_context(state, number)
+        dream = state.get("config", {}).get("mode") == "dream"
         words = self._target_words(state)
         request_minimum, request_maximum = self._narration_request_limits(state)
         sentence_count = max(3, min(10, math.ceil(words / 7)))
@@ -1547,6 +1609,19 @@ class TheaterManager:
             for s in recent_context
         ]
         used_hashes = [s.get("asset_fingerprint") for s in state.get("planned", [])[-30:]]
+        progression_contract = (
+            "Follow the invented dream bible through association rather than factual explanation. Develop a recurring "
+            "sensory motif, then let one meaningful impossible transformation move the dream forward. Do not define or "
+            "teach the initial cue, introduce real-world facts, announce a dream, or force ordinary waking logic. "
+            if dream else
+            "It must obey every premise_contract item and continuity rule, follow causally, introduce a new meaningful "
+            "development, and remain open-ended. "
+        )
+        grounding_block = (
+            "OFFLINE ENCYCLOPEDIA EXCERPTS — use no real-world claims beyond these:\n"
+            f"{self._grounding_text(state)}"
+            if self.uses_grounding(state["config"]) else ""
+        )
         request = (
             f"Story bible: {json.dumps(state['bible'], ensure_ascii=False)}\n"
             f"Current story summary: {state.get('story_summary')}\n"
@@ -1557,13 +1632,14 @@ class TheaterManager:
             f"This is a hard playback-duration budget: use exactly {sentence_count} complete sentences, make every "
             f"sentence contain {sentence_minimum}-{sentence_maximum} words and advance the action, and do not use "
             "recap or filler to reach the range. "
-            "It must obey every premise_contract item and continuity rule, follow causally, introduce a new meaningful "
-            "development, and remain open-ended. Replace story_summary with a compact current-state summary of at most "
+            f"{progression_contract}"
+            "Replace story_summary with a compact current-state summary of at most "
             "250 words; never append a scene transcript. Keep the JSON compact and do not add fields. "
+            f"{'learning_point must be an empty string. ' if dream else ''}"
             f"Avoid these prior asset fingerprints: {used_hashes}. Return "
             "{story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}} only.\n\n"
             f"{steering_prompt}"
-            f"OFFLINE ENCYCLOPEDIA EXCERPTS — use no real-world claims beyond these:\n{self._grounding_text(state)}"
+            f"{grounding_block}"
         )
         repair_reason = str(state.get("metrics", {}).get("planner_repair_reason") or "").strip()
         if repair_reason:
@@ -1582,6 +1658,10 @@ class TheaterManager:
         value = _json_object(content)
         scene = self._scene_object(value.get("scene", value), f"scene {number} plan")
         scene["number"] = number
+        if dream:
+            scene["learning_point"] = ""
+            scene.pop("sources", None)
+            scene.pop("fact_basis", None)
         required = ("title", "beat", "narration", "visual_action", "camera")
         if any(not str(scene.get(key, "")).strip() for key in required):
             raise TheaterError(f"The local writer's scene {number} is missing required story fields.")
@@ -1790,6 +1870,14 @@ class TheaterManager:
         rules = "; ".join(bible.get("continuity_rules", []))
         premise = "; ".join(bible.get("premise_contract", []))
         cast = self._cast_text(bible)
+        if state.get("config", {}).get("mode") == "dream":
+            return (
+                f"{bible['visual_style']}. {scene['camera']}. Inside the invented dream-space of {bible['world']}. "
+                f"Recurring figures and motifs: {cast}. {scene['visual_action']}. Dream associations: {premise}. "
+                f"Evolving motif rules: {rules}. Show one clear, coherent action inside this shot. Allow deliberate "
+                "surreal metamorphosis between established forms, but keep motion readable, anatomy intentional, and "
+                "the frame temporally coherent. No factual diagram, visible words, subtitles, logo, or watermark."
+            )
         host_framing = (
             "Keep the primary host clearly recognizable and present, with a natural near-camera eyeline while they "
             "continue the scene's physical activity. "
