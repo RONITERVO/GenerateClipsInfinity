@@ -588,6 +588,10 @@ class TheaterManager:
         language = str(config.get("translation_language") or "").lower()
         return language if language != str(config.get("language", "en")).lower() else ""
 
+    @staticmethod
+    def uses_grounding(config: dict[str, Any]) -> bool:
+        return str(config.get("mode", "edutainment")) in {"edutainment", "lesson"}
+
     @classmethod
     def narration_word_limits(cls, config: dict[str, Any]) -> tuple[int, int]:
         """Return source-prose limits while preserving the total speech budget.
@@ -785,6 +789,9 @@ class TheaterManager:
             "\nLIVE WORLD EVENTS AND DIRECTIONS:\n"
             f"{json.dumps(payload, ensure_ascii=False)}\n"
             "Make each next_scene event observably affect this scene now rather than postponing it. "
+            "Treat each audience_message as delayed viewer speech addressed to the recurring host: the host must "
+            "acknowledge its specific meaning and answer it naturally in the spoken narration during this scene, "
+            "without pretending the exchange is instantaneous or blindly making a viewer suggestion physically true. "
             "Treat persistent rules as active world constraints. Integrate directions causally while preserving the "
             "fixed premise contract, established identity and continuity, safety, and grounded factual limits.\n"
         )
@@ -816,8 +823,10 @@ class TheaterManager:
             raise TheaterError("Enter a live direction.")
         if len(cleaned) > self.LIVE_DIRECTIVE_MAX_CHARS:
             raise TheaterError(f"Live directions can contain at most {self.LIVE_DIRECTIVE_MAX_CHARS} characters.")
-        if scope not in {"next_scene", "persistent"}:
-            raise TheaterError("Choose a one-scene event or persistent world rule.")
+        if scope not in {"audience_message", "next_scene", "persistent"}:
+            raise TheaterError("Choose a chat message, one-scene event, or persistent world rule.")
+        if scope == "audience_message" and state.get("config", {}).get("mode") != "interactive":
+            raise TheaterError("Chat messages to the host require the Interactive character experience.")
         if delivery not in {"after_buffer", "next_unrendered"}:
             raise TheaterError("Choose delayed steering or next-unrendered steering.")
         active_count = sum(
@@ -836,7 +845,7 @@ class TheaterManager:
         activation_scene = reserved_through + 1 if delivery == "after_buffer" else 1
         directive = {
             "id": secrets.token_hex(6), "text": cleaned, "scope": scope,
-            "status": "pending" if scope == "next_scene" else "active",
+            "status": "active" if scope == "persistent" else "pending",
             "delivery": delivery, "activation_scene": activation_scene, "created_at": time.time(),
         }
         state.setdefault("live_directives", []).append(directive)
@@ -887,7 +896,7 @@ class TheaterManager:
         for item in state.get("live_directives", []):
             if item.get("id") not in directive_ids:
                 continue
-            if item.get("scope") == "next_scene" and item.get("status") == "pending":
+            if item.get("scope") in {"audience_message", "next_scene"} and item.get("status") == "pending":
                 item.update(status="applied", applied_scene=int(scene["number"]), applied_at=applied_at)
                 self._log_live_directive(state, {"action": "applied", **item})
             elif item.get("scope") == "persistent" and not item.get("first_applied_scene"):
@@ -976,6 +985,15 @@ class TheaterManager:
         mode = config.get("mode", "edutainment")
         language = config.get("language", "en")
         language_name = self.LANGUAGE_NAMES.get(language, language)
+        interactive_contract = (
+            " This is an interactive character show with one stable primary on-screen host. Keep the host's identity, "
+            "appearance, voice, relationships, setting and ongoing activity consistent. Narration is primarily the "
+            "host's natural first-person speech to the viewer, without narrator labels or stage directions. When no "
+            "viewer message is eligible, the host continues the activity, reflects, tells the unfolding story, or "
+            "invites a future response without stalling. Viewer messages are delayed turns, not real-time perception; "
+            "never claim to see, hear or monitor the viewer."
+            if mode == "interactive" else ""
+        )
         return (
             "You are the resident writer for a completely offline, endless audiovisual story theater. "
             f"MANDATORY OUTPUT LANGUAGE: {language_name} [{language}]. Every natural-language JSON string value, "
@@ -992,6 +1010,7 @@ class TheaterManager:
             "Educational facts must be correct, woven into action, "
             "and never presented as medical, legal or safety-critical advice. Narration must be natural spoken prose. "
             "Use complete sentences separated by spaces and avoid abbreviations that end in a period."
+            f"{interactive_contract}"
         )
 
     def _translation_system_prompt(self, config: dict[str, Any]) -> str:
@@ -1046,7 +1065,7 @@ class TheaterManager:
 
     async def _verify_scene(self, state: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
         source_text = self._grounding_text(state)
-        if state["config"].get("mode") == "story" or not source_text:
+        if not self.uses_grounding(state["config"]) or not source_text:
             return scene
         facts = self._fact_options(state)
         if not facts:
@@ -1216,6 +1235,13 @@ class TheaterManager:
         opening_sentence_maximum = max(
             opening_sentence_minimum, math.floor(opening_maximum / opening_sentences),
         )
+        interactive_opening = (
+            "This is an interactive character show. Establish one stable primary on-screen host from the seed, a "
+            "recognizable place and an ongoing activity that can continue indefinitely. Scene 1 is the host's concise "
+            "spoken opening: introduce who they are and what they are doing, welcome delayed viewer messages, and make "
+            "clear that viewers can chat or influence later moments. Keep narration in the host's first-person voice.\n"
+            if config.get("mode") == "interactive" else ""
+        )
         request = (
             f"Create an endless story from this seed: {config['prompt']}\n"
             f"Write every natural-language value only in {language_name}; English is forbidden except for JSON keys.\n"
@@ -1224,6 +1250,7 @@ class TheaterManager:
             "every explicitly requested main character and the immediate central situation or threat. Do not add a rule "
             "that postpones something the seed says is already happening. Give every recurring character a stable name, "
             "role and visual appearance.\n"
+            f"{interactive_opening}"
             f"Write {minimum_words}-{opening_maximum} narration words for scene 1. This is a hard playback-duration "
             f"budget; use exactly {opening_sentences} complete sentences with {opening_sentence_minimum}-"
             f"{opening_sentence_maximum} words each and no recap or filler.\n"
@@ -1251,6 +1278,13 @@ class TheaterManager:
         required_bible = ("protagonists", "world", "visual_style", "premise_contract", "continuity_rules")
         if any(key not in bible for key in required_bible):
             raise TheaterError("The local writer's story bible did not preserve the full premise contract.")
+        if config.get("mode") == "interactive":
+            bible["experience"] = "interactive_character"
+            bible["interaction_contract"] = [
+                "The primary host directly addresses delayed viewer messages in spoken narration.",
+                "The host never claims real-time sight, hearing, monitoring, or immediate response.",
+                "Without a viewer message, the host continues the established activity and open-ended show.",
+            ]
         value["scene"] = self._scene_object(value["scene"], "bootstrap")
         value["scene"]["planner_metrics"] = dict(metrics)
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
@@ -1756,9 +1790,14 @@ class TheaterManager:
         rules = "; ".join(bible.get("continuity_rules", []))
         premise = "; ".join(bible.get("premise_contract", []))
         cast = self._cast_text(bible)
+        host_framing = (
+            "Keep the primary host clearly recognizable and present, with a natural near-camera eyeline while they "
+            "continue the scene's physical activity. "
+            if state.get("config", {}).get("mode") == "interactive" else ""
+        )
         return (
             f"{bible['visual_style']}. {scene['camera']}. In {bible['world']}. "
-            f"The recurring cast is: {cast}. {scene['visual_action']}. Binding premise: {premise}. "
+            f"The recurring cast is: {cast}. {host_framing}{scene['visual_action']}. Binding premise: {premise}. "
             f"Strict continuity: {rules}. Same faces, ages, bodies, wardrobe, props, architecture and palette. "
             "One clear action, natural restrained motion, coherent anatomy, no duplicate characters, "
             "no visible words, no subtitles, no logo, no watermark."
@@ -2280,10 +2319,10 @@ class TheaterManager:
             startup = [
                 self.supertonic.start(self._dir(state["id"]) / "logs"),
             ]
-            if state["config"].get("mode") != "story":
+            if self.uses_grounding(state["config"]):
                 startup.append(self.kiwix.start(self._dir(state["id"]) / "logs"))
             await asyncio.gather(*startup)
-            if state["config"].get("mode") != "story" and not state.get("grounding"):
+            if self.uses_grounding(state["config"]) and not state.get("grounding"):
                 state.update(status="planning", message="Searching the offline encyclopedia before writing factual scenes...")
                 self._save(state)
                 query = state["config"].get("learning_focus") or state["config"]["prompt"]

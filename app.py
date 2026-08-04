@@ -649,8 +649,8 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("The theater prompt is too long (maximum 1,200 characters).")
     mode = str(raw.get("mode", "edutainment"))
     audience = str(raw.get("audience", "family"))
-    if mode not in {"story", "edutainment", "lesson"}:
-        raise ValueError("Choose story, edutainment, or lesson mode.")
+    if mode not in {"interactive", "story", "edutainment", "lesson"}:
+        raise ValueError("Choose interactive character, story, edutainment, or lesson mode.")
     if audience not in {"young", "family", "teen", "adult"}:
         raise ValueError("Choose a supported audience level.")
     voice = str(raw.get("voice", "M1")).upper()

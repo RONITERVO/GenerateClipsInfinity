@@ -9,6 +9,7 @@ This repository contains the application code only. Model weights, Wikipedia arc
 - Single Wan 2.2 text-to-video clips with the tested two-stage LightX2V workflow.
 - One-sentence movie planning, progressive generation, editable per-clip timing, subtitles, EDL, CSV shot list, and final MP4 export.
 - Endless offline theater with a bounded Gemma GPU opening burst, Gemma/Supertonic sustaining work on CPU, and Wan rendering on the GPU.
+- Interactive character show mode: a stable resident host continues an activity, receives delayed viewer chat or decisions, and answers in later synchronized scenes.
 - Live world direction during Endless Theater: inject a one-scene event or a persistent future rule without replacing completed media.
 - Optional bilingual language-learning playback: every story sentence is displayed and spoken first in the selected story language and then in the learner's translation language.
 - Progressive playback: completed scenes appear while later scenes are still being planned and generated.
@@ -143,6 +144,22 @@ This is deliberately not described as a real-time world model. Gemma plans symbo
 To make fast steering reliable, every new speculative plan carries a causal-state checkpoint. When fast input arrives, the planner and translator stop at a safe await boundary, the app restores the checkpoint before the first unrendered plan, drops only that speculative text suffix, and rebuilds its bounded queues. Rolling story summary, structured continuity memory, compaction boundary, and one-shot directive status move together. Older saved buffers without these checkpoints remain playable and apply the direction after their existing buffer rather than guessing at a rollback. Delayed steering never enters this rollback path.
 
 The design follows the useful interaction vocabulary of modern world-model research—persistent environments plus promptable events—without requiring a new experimental model or claiming frame-level simulation. See Google DeepMind's [Genie model overview](https://deepmind.google/models/genie/) and [prompt guide](https://deepmind.google/models/genie/prompt-guide/) for the distinction. On this hardware, event-sourced scene steering is the maintainable option: it adds negligible VRAM use, preserves the measured Gemma/Wan resource split, survives restart, and can later drive another planner or renderer through the same directive API.
+
+### Interactive character show
+
+Choose **Interactive character show** to create a recurring on-screen host, recognizable setting, and ongoing activity instead of an ordinary narrated cast. The opening introduces the host and invites delayed participation. While it runs, the live panel offers three distinct inputs:
+
+- **Chat message to host** is a single conversational turn. At its reserved scene, the host acknowledges the message's actual meaning and answers aloud rather than treating every question as a physical command.
+- **One-scene event** lets the viewer decide a later moment in the host's day or story.
+- **Persistent world rule** changes all eligible future scenes until removed.
+
+All three default to the non-disruptive delayed queue. Chat is stored immediately but excluded from Gemma prompts until its reserved scene, so it adds no inference pass and does not cancel planning, translation, speech preparation, or video generation. The archive connects each generated segment to the directive IDs it answered, and `live_directives.jsonl` preserves the complete input/application transcript.
+
+This mode deliberately uses the installed Pure Story resources: Gemma 4 E4B for the character and reply, Supertonic for speech, Wan for a newly generated visual, and the existing FFmpeg synchronizer. It does not require a microphone, speech recognition, WebRTC, a cloud avatar service, or another resident model. This keeps it fully offline and gives it the same sustained throughput as Pure Story apart from a small bounded prompt addition when a message becomes eligible.
+
+It is not a lip-synchronized real-time avatar. Wan text-to-video identity consistency is best-effort even with the fixed character bible, recurring appearance prompt, and host-oriented framing. A message is answered at a scene boundary only after its matching visual and audio are complete. This is closer to a deliberately delayed “chat decides what happens” show than a video call, which is the honest long-term interaction model for the current RTX 5070 pipeline.
+
+Language learning remains available without a separate path. Select a story language and a translation language before starting; every host sentence—including answers to viewer chat—is displayed and spoken in the original language followed by its translation, inside the same total speech-duration budget.
 
 ### Language-learning mode
 

@@ -525,6 +525,36 @@ class PromptTests(unittest.TestCase):
         self.assertIn("MANDATORY OUTPUT LANGUAGE: Finnish (suomi) [fi]", prompt)
         self.assertIn("Do not translate the user's story into English", prompt)
 
+    def test_interactive_character_mode_reuses_pure_story_resources_and_translation(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        config = validate_theater_payload({
+            "prompt": "A lighthouse keeper talks with viewers.",
+            "mode": "interactive", "language": "fi", "translation_language": "en",
+        })
+        prompt = manager._system_prompt(config)
+        self.assertEqual(config["mode"], "interactive")
+        self.assertEqual(config["translation_language"], "en")
+        self.assertFalse(manager.uses_grounding(config))
+        self.assertIn("one stable primary on-screen host", prompt)
+        self.assertIn("host's natural first-person speech", prompt)
+        self.assertIn("delayed turns, not real-time perception", prompt)
+
+    def test_interactive_visual_prompt_keeps_host_present_and_recognizable(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        state = {
+            "config": {"mode": "interactive"},
+            "bible": {
+                "visual_style": "cinematic documentary", "world": "an old lighthouse",
+                "protagonists": [{"name": "Mira", "role": "keeper", "appearance": "yellow coat"}],
+                "premise_contract": ["Mira repairs the lamp"], "continuity_rules": ["The storm continues"],
+            },
+        }
+        prompt = manager._visual_prompt(state, {
+            "camera": "medium shot", "visual_action": "Mira cleans a brass lens.",
+        })
+        self.assertIn("primary host clearly recognizable and present", prompt)
+        self.assertIn("natural near-camera eyeline", prompt)
+
     def test_gemma4_e4b_is_primary_and_uses_measured_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1101,6 +1131,38 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(early_ids, [])
         self.assertIn("The comet becomes visible", ready_prompt)
         self.assertEqual(ready_ids, ["later"])
+
+    def test_audience_chat_is_a_single_durable_turn_only_in_interactive_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = Path(directory)
+            manager.tasks = {}
+            manager.steering_events = {}
+            manager._save = lambda _state: None
+            ordinary = {
+                "id": "ordinary", "config": {"mode": "story"}, "planned": [], "segments": [],
+                "metrics": {}, "live_directives": [],
+            }
+            interactive = {
+                "id": "interactive", "config": {"mode": "interactive"}, "planned": [], "segments": [],
+                "metrics": {}, "live_directives": [],
+            }
+            manager.sessions = {"ordinary": ordinary, "interactive": interactive}
+            with self.assertRaisesRegex(TheaterError, "Interactive character"):
+                manager.add_live_directive("ordinary", "How was your day?", "audience_message")
+            manager.add_live_directive("interactive", "How was your day?", "audience_message")
+            directive = interactive["live_directives"][0]
+            prompt, ids = manager._steering_context(interactive, directive["activation_scene"])
+            self.assertEqual(directive["status"], "pending")
+            self.assertEqual(directive["delivery"], "after_buffer")
+            self.assertIn("delayed viewer speech", prompt)
+            self.assertIn("answer it naturally", prompt)
+            self.assertEqual(ids, [directive["id"]])
+            manager._log_live_directive = lambda *_args: None
+            manager._mark_directives_applied(
+                interactive, {"number": directive["activation_scene"], "_live_directive_ids": ids},
+            )
+            self.assertEqual(directive["status"], "applied")
 
     def test_live_word_target_stays_inside_custom_budget(self):
         manager = TheaterManager.__new__(TheaterManager)
