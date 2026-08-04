@@ -20,7 +20,7 @@ The reference system is Windows 11 with a Ryzen 9 7950X, 64 GB RAM, and an NVIDI
 - Gemma 4 E4B Q4_K_M: 15.31 output tokens/second and 146.73 prompt tokens/second at 8 CPU threads; about 4.62 GiB resident RAM.
 - Live Theater planning: 13.29 output tokens/second with the video and speech services available.
 - Supertonic 3: approximately 0.20 real-time factor in the measured narration test.
-- **Cinema preview (`480 x 272 / 81 frames`) is the recommended and user-tested Theater preset on this PC.** Realtime and Balanced remain available as experimental options, but they have not received comparable real-world testing and are not claimed as validated presets.
+- **Cinema preview (`480 x 272 / 81 frames / 16 FPS`) is the user-tested Theater default on this PC.** There is no preset selector. Advanced custom generation exposes width, height, source frames, playback FPS, narration word limits, maximum slow-motion, and seed. Saved sessions created by older versions retain their original render settings.
 
 ## Required local components
 

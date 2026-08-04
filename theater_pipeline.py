@@ -388,11 +388,23 @@ class TheaterManager:
         "sl": "Slovenian", "es": "Spanish", "sv": "Swedish", "tr": "Turkish", "uk": "Ukrainian",
         "vi": "Vietnamese", "na": "the same language as the user's seed prompt",
     }
-    QUALITY = {
+    CINEMA_DEFAULTS = {
+        "width": 480, "height": 272, "frames": 81, "fps": 16,
+        "min_words": 220, "max_words": 600, "max_slow": 8.0,
+    }
+    # Kept only so existing archived sessions remain resumable after the preset UI was removed.
+    LEGACY_QUALITY = {
         "realtime": {"width": 192, "height": 192, "frames": 33, "fps": 12, "min_words": 90, "max_words": 260, "max_slow": 6.0},
         "balanced": {"width": 480, "height": 272, "frames": 49, "fps": 12, "min_words": 150, "max_words": 420, "max_slow": 7.0},
-        "cinema": {"width": 480, "height": 272, "frames": 81, "fps": 16, "min_words": 220, "max_words": 600, "max_slow": 8.0},
+        "cinema": CINEMA_DEFAULTS,
     }
+
+    @classmethod
+    def quality_settings(cls, config: dict[str, Any]) -> dict[str, Any]:
+        custom = config.get("quality_settings")
+        if isinstance(custom, dict):
+            return {**cls.CINEMA_DEFAULTS, **custom}
+        return dict(cls.LEGACY_QUALITY.get(str(config.get("quality", "cinema")), cls.CINEMA_DEFAULTS))
 
     def __init__(
         self, app_dir: Path, output_root: Path, story_model_root: Path, llama_runtime_root: Path,
@@ -674,7 +686,7 @@ class TheaterManager:
 
     async def _bootstrap(self, state: dict[str, Any]) -> dict[str, Any]:
         config = state["config"]
-        quality = self.QUALITY[config["quality"]]
+        quality = self.quality_settings(config)
         language_name = self.LANGUAGE_NAMES.get(config.get("language", "en"), config.get("language", "en"))
         request = (
             f"Create an endless story from this seed: {config['prompt']}\n"
@@ -714,7 +726,7 @@ class TheaterManager:
         return value
 
     def _target_words(self, state: dict[str, Any]) -> int:
-        quality = self.QUALITY[state["config"]["quality"]]
+        quality = self.quality_settings(state["config"])
         production = float(state["metrics"].get("production_ema") or 0)
         if not production:
             return quality["min_words"]
@@ -889,7 +901,7 @@ class TheaterManager:
         number = int(scene["number"])
         raw_duration = await self._duration(raw_video)
         audio_duration = await self._duration(audio)
-        quality = self.QUALITY[state["config"]["quality"]]
+        quality = self.quality_settings(state["config"])
         fps = int(quality["fps"])
         slow_duration = min(audio_duration, raw_duration * float(quality["max_slow"]))
         ratio = slow_duration / max(0.05, raw_duration * (quality["frames"] - 1) / quality["frames"])
@@ -944,7 +956,7 @@ class TheaterManager:
     async def _render_scene(self, state: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
         """Create raw video and narration, leaving CPU muxing to another worker."""
         number = int(scene["number"])
-        quality = self.QUALITY[state["config"]["quality"]]
+        quality = self.quality_settings(state["config"])
         directory = self._dir(state["id"])
         cycle_started = time.perf_counter()
         audio_rel = f"wan_theater/{state['id']}/audio/scene_{number:05d}.wav"

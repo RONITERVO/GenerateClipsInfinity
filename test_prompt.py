@@ -55,16 +55,31 @@ class PromptTests(unittest.TestCase):
 
     def test_theater_defaults_to_tested_cinema_preview(self):
         config = validate_theater_payload({"prompt": "Teach astronomy through an adventure."})
-        self.assertEqual(config["quality"], "cinema")
+        self.assertEqual(config["quality"], "custom")
+        self.assertEqual(config["quality_settings"], TheaterManager.CINEMA_DEFAULTS)
         self.assertEqual(config["mode"], "edutainment")
         self.assertEqual(config["audience"], "family")
         self.assertEqual(config["voice"], "M1")
         self.assertEqual(config["language"], "en")
         self.assertGreaterEqual(config["seed"], 0)
 
-    def test_theater_rejects_unknown_quality(self):
-        with self.assertRaisesRegex(ValueError, "supported theater quality"):
-            validate_theater_payload({"prompt": "A story", "quality": "impossible"})
+    def test_theater_accepts_all_advanced_generation_values(self):
+        requested = {
+            "width": 640, "height": 368, "frames": 65, "fps": 24,
+            "min_words": 120, "max_words": 360, "max_slow": 12.5,
+        }
+        config = validate_theater_payload({"prompt": "A story", "quality_settings": requested})
+        self.assertEqual(config["quality_settings"], requested)
+        self.assertEqual(TheaterManager.quality_settings(config), requested)
+
+    def test_theater_rejects_invalid_custom_frame_rule(self):
+        with self.assertRaisesRegex(ValueError, r"4n\+1"):
+            validate_theater_payload({"prompt": "A story", "quality_settings": {"frames": 80}})
+
+    def test_legacy_theater_archives_keep_their_saved_quality(self):
+        settings = TheaterManager.quality_settings({"quality": "realtime"})
+        self.assertEqual(settings["width"], 192)
+        self.assertEqual(settings["frames"], 33)
 
     def test_first_scene_review_failure_is_sent_to_consumer(self):
         async def exercise():

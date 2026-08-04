@@ -623,11 +623,8 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Write a story or learning idea first.")
     if len(prompt) > 1200:
         raise ValueError("The theater prompt is too long (maximum 1,200 characters).")
-    quality = str(raw.get("quality", "cinema"))
     mode = str(raw.get("mode", "edutainment"))
     audience = str(raw.get("audience", "family"))
-    if quality not in TheaterManager.QUALITY:
-        raise ValueError("Choose a supported theater quality.")
     if mode not in {"story", "edutainment", "lesson"}:
         raise ValueError("Choose story, edutainment, or lesson mode.")
     if audience not in {"young", "family", "teen", "adult"}:
@@ -641,9 +638,42 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
     seed = int(raw.get("seed", -1))
     if seed < 0:
         seed = secrets.randbelow(2**31 - 1)
+    supplied_settings = raw.get("quality_settings", {})
+    if not isinstance(supplied_settings, dict):
+        raise ValueError("Advanced generation settings must be an object.")
+    defaults = TheaterManager.CINEMA_DEFAULTS
+    try:
+        width = int(supplied_settings.get("width", defaults["width"]))
+        height = int(supplied_settings.get("height", defaults["height"]))
+        frames = int(supplied_settings.get("frames", defaults["frames"]))
+        fps = int(supplied_settings.get("fps", defaults["fps"]))
+        min_words = int(supplied_settings.get("min_words", defaults["min_words"]))
+        max_words = int(supplied_settings.get("max_words", defaults["max_words"]))
+        max_slow = float(supplied_settings.get("max_slow", defaults["max_slow"]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Advanced generation values must be numeric.") from exc
+    if width < 192 or width > 832 or width % 16:
+        raise ValueError("Theater width must be a multiple of 16 between 192 and 832.")
+    if height < 192 or height > 832 or height % 16:
+        raise ValueError("Theater height must be a multiple of 16 between 192 and 832.")
+    if frames < 9 or frames > 81 or (frames - 1) % 4:
+        raise ValueError("Theater source frames must be 9-81 and follow the 4n+1 rule.")
+    if fps < 1 or fps > 60:
+        raise ValueError("Theater playback FPS must be between 1 and 60.")
+    if min_words < 30 or min_words > 1200:
+        raise ValueError("Minimum narration words must be between 30 and 1,200.")
+    if max_words < min_words or max_words > 2400:
+        raise ValueError("Maximum narration words must be at least the minimum and no more than 2,400.")
+    if max_slow < 1 or max_slow > 20:
+        raise ValueError("Maximum slow-motion must be between 1x and 20x.")
+    quality_settings = {
+        "width": width, "height": height, "frames": frames, "fps": fps,
+        "min_words": min_words, "max_words": max_words, "max_slow": max_slow,
+    }
     return {
         "prompt": prompt, "learning_focus": str(raw.get("learning_focus", "")).strip()[:800],
-        "quality": quality, "mode": mode, "audience": audience, "seed": seed,
+        "quality": "custom", "quality_settings": quality_settings,
+        "mode": mode, "audience": audience, "seed": seed,
         "voice": voice, "language": language,
     }
 
