@@ -12,6 +12,7 @@ import secrets
 import shutil
 import subprocess
 import time
+import wave
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,7 +20,7 @@ from aiohttp import ClientSession, ClientTimeout
 
 
 LOGGER = logging.getLogger("wan-video-ui.theater")
-THEATER_VERSION = 1
+THEATER_VERSION = 2
 
 
 class TheaterError(RuntimeError):
@@ -46,6 +47,47 @@ def _json_object(text: str) -> dict[str, Any]:
     if start < 0 or end <= start:
         raise TheaterError("The local story writer did not return a JSON object.")
     return json.loads(text[start : end + 1])
+
+
+def split_narration_sentences(text: str) -> list[str]:
+    """Split generated narration without requiring an online NLP tokenizer.
+
+    Story prompts require ordinary sentence punctuation. CJK terminators are
+    boundaries even without following whitespace; Latin terminators split when
+    followed by whitespace. Closing quotes stay attached to their sentence.
+    """
+    normalized = re.sub(r"\s+", " ", str(text)).strip()
+    if not normalized:
+        return []
+    sentences: list[str] = []
+    start = 0
+    index = 0
+    closers = {'"', "'", "\u201d", "\u2019", "\u00bb", ")", "]", "}", "\u300d", "\u300f"}
+    while index < len(normalized):
+        character = normalized[index]
+        is_cjk_end = character in "\u3002\uff01\uff1f"
+        is_spaced_end = character in ".!?" and (
+            index + 1 == len(normalized) or normalized[index + 1].isspace()
+            or normalized[index + 1] in closers
+        )
+        if is_cjk_end or is_spaced_end:
+            end = index + 1
+            while end < len(normalized) and normalized[end] in closers:
+                end += 1
+            if is_cjk_end or end == len(normalized) or normalized[end].isspace():
+                sentence = normalized[start:end].strip()
+                if sentence:
+                    sentences.append(sentence)
+                while end < len(normalized) and normalized[end].isspace():
+                    end += 1
+                start = end
+                index = end
+                continue
+        index += 1
+    tail = normalized[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
 
 
 class StoryRuntime:
@@ -164,6 +206,7 @@ class SupertonicRuntime:
         "hi", "hu", "id", "it", "ja", "ko", "lv", "lt", "pl", "pt", "ro", "ru",
         "sk", "sl", "es", "sv", "tr", "uk", "vi", "na",
     }
+    TRANSLATION_LANGUAGES = LANGUAGES - {"na"}
 
     def __init__(self, app_dir: Path, root: Path) -> None:
         self.app_dir = app_dir
@@ -233,6 +276,58 @@ class SupertonicRuntime:
                     raise TheaterError(f"Supertonic narration failed: {data.decode(errors='replace')[:500]}")
         output.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(output.write_bytes, data)
+        return time.perf_counter() - started
+
+    @staticmethod
+    def _concatenate_wavs(parts: list[Path], output: Path) -> None:
+        if not parts:
+            raise TheaterError("Bilingual narration contained no audio parts.")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        expected: tuple[int, int, int, str] | None = None
+        with wave.open(str(output), "wb") as destination:
+            for part in parts:
+                with wave.open(str(part), "rb") as source:
+                    parameters = (
+                        source.getnchannels(), source.getsampwidth(), source.getframerate(), source.getcomptype(),
+                    )
+                    if expected is None:
+                        expected = parameters
+                        destination.setnchannels(parameters[0])
+                        destination.setsampwidth(parameters[1])
+                        destination.setframerate(parameters[2])
+                        destination.setcomptype(parameters[3], source.getcompname())
+                    elif parameters != expected:
+                        raise TheaterError("Supertonic returned incompatible WAV formats for bilingual narration.")
+                    destination.writeframes(source.readframes(source.getnframes()))
+
+    async def synthesize_alternating(
+        self, pairs: list[dict[str, str]], output: Path, *, voice: str,
+        original_language: str, translation_language: str,
+    ) -> float:
+        """Speak each source sentence immediately followed by its translation."""
+        if not translation_language:
+            text = " ".join(str(pair.get("original", "")).strip() for pair in pairs).strip()
+            return await self.synthesize(text, output, voice=voice, language=original_language)
+        started = time.perf_counter()
+        part_dir = output.parent / f".{output.stem}_parts"
+        part_dir.mkdir(parents=True, exist_ok=True)
+        parts: list[Path] = []
+        try:
+            for index, pair in enumerate(pairs, 1):
+                original = str(pair.get("original", "")).strip()
+                translated = str(pair.get("translation", "")).strip()
+                if not original or not translated:
+                    raise TheaterError(f"Bilingual sentence {index} is incomplete.")
+                for suffix, text, language in (
+                    ("original", original, original_language),
+                    ("translation", translated, translation_language),
+                ):
+                    part = part_dir / f"{index:03d}_{suffix}.wav"
+                    await self.synthesize(text, part, voice=voice, language=language)
+                    parts.append(part)
+            await asyncio.to_thread(self._concatenate_wavs, parts, output)
+        finally:
+            await asyncio.to_thread(shutil.rmtree, part_dir, True)
         return time.perf_counter() - started
 
     async def stop(self) -> None:
@@ -406,6 +501,26 @@ class TheaterManager:
             return {**cls.CINEMA_DEFAULTS, **custom}
         return dict(cls.LEGACY_QUALITY.get(str(config.get("quality", "cinema")), cls.CINEMA_DEFAULTS))
 
+    @staticmethod
+    def translation_language(config: dict[str, Any]) -> str:
+        language = str(config.get("translation_language") or "").lower()
+        return language if language != str(config.get("language", "en")).lower() else ""
+
+    @classmethod
+    def narration_word_limits(cls, config: dict[str, Any]) -> tuple[int, int]:
+        """Return source-prose limits while preserving the total speech budget.
+
+        In bilingual mode each source sentence is spoken twice. A conservative
+        2.1 multiplier leaves room for translations that use slightly more words
+        than the source instead of making every scene roughly twice as long.
+        """
+        quality = cls.quality_settings(config)
+        if not cls.translation_language(config):
+            return int(quality["min_words"]), int(quality["max_words"])
+        minimum = max(12, math.ceil(float(quality["min_words"]) / 2.1))
+        maximum = max(minimum, math.floor(float(quality["max_words"]) / 2.1))
+        return minimum, maximum
+
     def __init__(
         self, app_dir: Path, output_root: Path, story_model_root: Path, llama_runtime_root: Path,
         supertonic_root: Path, kiwix_root: Path, controller: Any,
@@ -455,6 +570,7 @@ class TheaterManager:
         archive = {
             "format": "Wan Endless Theater", "version": THEATER_VERSION,
             "id": state["id"], "title": state.get("title"), "prompt": state["config"]["prompt"],
+            "config": state["config"],
             "bible": state.get("bible"), "grounding": state.get("grounding"), "segments": segments,
             "total_duration": state.get("total_duration", 0), "updated": state.get("updated"),
         }
@@ -576,7 +692,20 @@ class TheaterManager:
             f"appropriate for audience={age}, and mode={mode}. In educational modes, use only factual claims "
             "directly supported by the supplied offline encyclopedia excerpts; omit any unsupported causal explanation. "
             "Educational facts must be correct, woven into action, "
-            "and never presented as medical, legal or safety-critical advice. Narration must be natural spoken prose."
+            "and never presented as medical, legal or safety-critical advice. Narration must be natural spoken prose. "
+            "Use complete sentences separated by spaces and avoid abbreviations that end in a period."
+        )
+
+    def _translation_system_prompt(self, config: dict[str, Any]) -> str:
+        source = str(config.get("language", "en")).lower()
+        target = self.translation_language(config)
+        source_name = self.LANGUAGE_NAMES.get(source, source)
+        target_name = self.LANGUAGE_NAMES.get(target, target)
+        return (
+            "You are the translation stage of a completely offline language-learning story theater. "
+            f"Translate from {source_name} [{source}] to {target_name} [{target}]. Return only valid JSON. "
+            "Preserve meaning, names, dialogue, tone and verified facts exactly. Use natural, concise spoken language. "
+            "Never add explanations, omit details, combine sentences, split sentences, or change the supplied ids."
         )
 
     @staticmethod
@@ -628,7 +757,7 @@ class TheaterManager:
         words = len(str(scene.get("narration", "")).split())
         # Small local writers reliably remove unsupported prose but often make the result
         # substantially tighter. Reject missing facts/fields, not harmless brevity.
-        minimum_words = max(30, int(words * 0.50))
+        minimum_words = max(12, int(words * 0.50))
         maximum_words = max(minimum_words + 30, int(words * 1.25))
         request = (
             "Act as a strict factual editor. First discard every real-world explanation or causal claim from the draft. "
@@ -684,10 +813,73 @@ class TheaterManager:
                 last_error = exc
         raise TheaterError(f"Factual review of scene {scene['number']} failed closed: {last_error}")
 
+    async def _prepare_narration(self, state: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
+        """Create the durable, sentence-aligned transcript used by UI and TTS."""
+        originals = split_narration_sentences(str(scene.get("narration", "")))
+        if not originals:
+            raise TheaterError(f"Scene {scene.get('number')} contains no speakable narration sentences.")
+        if len(originals) > 48:
+            raise TheaterError(f"Scene {scene.get('number')} contains too many narration sentences.")
+        config = state["config"]
+        source_language = str(config.get("language", "en")).lower()
+        target_language = self.translation_language(config)
+        scene["source_language"] = source_language
+        scene["translation_language"] = target_language
+        if not target_language:
+            scene["narration_sentences"] = [{"original": sentence} for sentence in originals]
+            return scene
+
+        numbered = [{"id": index, "text": sentence} for index, sentence in enumerate(originals, 1)]
+        request = (
+            "Translate the title and every numbered narration sentence. Keep the exact sentence count and ids. "
+            "The result is read aloud immediately after each original sentence, so translations must be concise and "
+            "must not contain teaching commentary. Return "
+            "{title_translation,sentences:[{id,translation}]} only.\n\n"
+            f"TITLE: {scene.get('title', '')}\nSENTENCES: {json.dumps(numbered, ensure_ascii=False)}"
+        )
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            state["message"] = (
+                f"The local writer is aligning scene {scene['number']} sentence translations "
+                f"(attempt {attempt}/3)..."
+            )
+            state.setdefault("metrics", {})["planner_stage"] = "translation"
+            state["metrics"]["translation_attempt"] = attempt
+            self._save(state)
+            content, metrics = await self.writer.complete([
+                {"role": "system", "content": self._translation_system_prompt(config)},
+                {"role": "user", "content": request},
+            ], max_tokens=min(2200, max(500, len(str(scene["narration"]).split()) * 5 + 250)))
+            with (self._dir(state["id"]) / "logs" / "translation_raw.jsonl").open("a", encoding="utf-8") as log:
+                log.write(json.dumps({
+                    "time": time.time(), "number": scene["number"], "attempt": attempt, "content": content,
+                }, ensure_ascii=False) + "\n")
+            try:
+                value = _json_object(content)
+                translated_title = str(value.get("title_translation", "")).strip()
+                translations = value.get("sentences")
+                if not translated_title or not isinstance(translations, list) or len(translations) != len(originals):
+                    raise TheaterError("translation output did not preserve the title and sentence count")
+                aligned: list[dict[str, str]] = []
+                for expected_id, (original, translated) in enumerate(zip(originals, translations), 1):
+                    if not isinstance(translated, dict) or int(translated.get("id", -1)) != expected_id:
+                        raise TheaterError("translation output changed sentence ids or order")
+                    text = str(translated.get("translation", "")).strip()
+                    if not text:
+                        raise TheaterError(f"translation sentence {expected_id} was empty")
+                    aligned.append({"original": original, "translation": text})
+                scene["translated_title"] = translated_title
+                scene["narration_sentences"] = aligned
+                state["metrics"]["translation_tps"] = metrics["tokens_per_second"]
+                return scene
+            except (TheaterError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+        raise TheaterError(f"Sentence translation of scene {scene['number']} failed closed: {last_error}")
+
     async def _bootstrap(self, state: dict[str, Any]) -> dict[str, Any]:
         config = state["config"]
-        quality = self.quality_settings(config)
         language_name = self.LANGUAGE_NAMES.get(config.get("language", "en"), config.get("language", "en"))
+        minimum_words, maximum_words = self.narration_word_limits(config)
         request = (
             f"Create an endless story from this seed: {config['prompt']}\n"
             f"Write every natural-language value only in {language_name}; English is forbidden except for JSON keys.\n"
@@ -696,7 +888,7 @@ class TheaterManager:
             "every explicitly requested main character and the immediate central situation or threat. Do not add a rule "
             "that postpones something the seed says is already happening. Give every recurring character a stable name, "
             "role and visual appearance.\n"
-            f"Write {quality['min_words']}-{min(quality['max_words'], quality['min_words'] + 80)} narration words for scene 1.\n"
+            f"Write {minimum_words}-{min(maximum_words, minimum_words + 80)} narration words for scene 1.\n"
             "Return {title,bible:{protagonists:[{name,role,appearance}],world,visual_style,premise_contract:[...],"
             "continuity_rules:[...]},"
             "story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}}. "
@@ -726,12 +918,13 @@ class TheaterManager:
         return value
 
     def _target_words(self, state: dict[str, Any]) -> int:
-        quality = self.quality_settings(state["config"])
+        minimum_words, maximum_words = self.narration_word_limits(state["config"])
         production = float(state["metrics"].get("production_ema") or 0)
         if not production:
-            return quality["min_words"]
+            return minimum_words
         # Measured F3 narration is about 2.7-3.5 words/second. Target ~30% playback headroom.
-        return int(max(quality["min_words"], min(quality["max_words"], production * 4.6)))
+        speech_multiplier = 2.1 if self.translation_language(state["config"]) else 1.0
+        return int(max(minimum_words, min(maximum_words, production * 4.6 / speech_multiplier)))
 
     async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
         words = self._target_words(state)
@@ -743,7 +936,7 @@ class TheaterManager:
             f"Story bible: {json.dumps(state['bible'], ensure_ascii=False)}\n"
             f"Current story summary: {state.get('story_summary')}\nRecent scenes: {json.dumps(prior, ensure_ascii=False)}\n"
             f"Write every natural-language value only in {language_name}; do not switch to English. "
-            f"Create scene {number} with {max(60, words - 25)}-{words + 25} narration words. "
+            f"Create scene {number} with {max(12, words - 25)}-{max(12, words + 25)} narration words. "
             "It must obey every premise_contract item and continuity rule, follow causally, introduce a new meaningful "
             "development, and remain open-ended. Keep the JSON compact and do not add fields. "
             f"Avoid these prior asset fingerprints: {used_hashes}. Return "
@@ -763,6 +956,7 @@ class TheaterManager:
         if any(not str(scene.get(key, "")).strip() for key in required):
             raise TheaterError(f"The local writer's scene {number} is missing required story fields.")
         scene = await self._verify_scene(state, scene)
+        scene = await self._prepare_narration(state, scene)
         fingerprint_text = f"{scene['beat']}|{scene['visual_action']}|{scene['camera']}".lower()
         scene["asset_fingerprint"] = hashlib.sha256(fingerprint_text.encode("utf-8")).hexdigest()[:16]
         if scene["asset_fingerprint"] in {s.get("asset_fingerprint") for s in state.get("planned", [])}:
@@ -786,6 +980,7 @@ class TheaterManager:
                     scene = dict(self._scene_object(state["bootstrap_scene"], "saved bootstrap"))
                     scene["number"] = 1
                     scene = await self._verify_scene(state, scene)
+                    scene = await self._prepare_narration(state, scene)
                     text = f"{scene.get('beat')}|{scene.get('visual_action')}|{scene.get('camera')}".lower()
                     scene["asset_fingerprint"] = hashlib.sha256(text.encode()).hexdigest()[:16]
                     state.pop("bootstrap_scene", None)
@@ -961,10 +1156,17 @@ class TheaterManager:
         cycle_started = time.perf_counter()
         audio_rel = f"wan_theater/{state['id']}/audio/scene_{number:05d}.wav"
         audio_path = self.output_root / audio_rel
-        tts_task = asyncio.create_task(self.supertonic.synthesize(
-            scene["narration"], audio_path,
+        pairs = scene.get("narration_sentences")
+        if not isinstance(pairs, list) or not pairs:
+            pairs = [{"original": sentence} for sentence in split_narration_sentences(scene["narration"])]
+        translation_language = self.translation_language(state["config"])
+        if translation_language and any(not str(pair.get("translation", "")).strip() for pair in pairs):
+            raise TheaterError(f"Scene {number} is missing an aligned translation and cannot be narrated safely.")
+        tts_task = asyncio.create_task(self.supertonic.synthesize_alternating(
+            pairs, audio_path,
             voice=str(state["config"].get("voice", "M1")),
-            language=str(state["config"].get("language", "en")),
+            original_language=str(state["config"].get("language", "en")),
+            translation_language=translation_language,
         ))
         try:
             async with self.controller.workflow_lock:
@@ -1023,6 +1225,10 @@ class TheaterManager:
         entry = {
             "number": number, "title": scene["title"], "beat": scene["beat"],
             "narration": scene["narration"], "learning_point": scene.get("learning_point", ""),
+            "translated_title": scene.get("translated_title", ""),
+            "narration_sentences": scene.get("narration_sentences", []),
+            "source_language": scene.get("source_language", state["config"].get("language", "en")),
+            "translation_language": scene.get("translation_language", ""),
             "sources": scene.get("sources", []),
             "visual_action": scene["visual_action"], "path": relative,
             "raw_video_path": work_item["video_rel"], "audio_path": work_item["audio_rel"], "created": time.time(),

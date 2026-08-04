@@ -9,6 +9,7 @@ This repository contains the application code only. Model weights, Wikipedia arc
 - Single Wan 2.2 text-to-video clips with the tested two-stage LightX2V workflow.
 - One-sentence movie planning, progressive generation, editable per-clip timing, subtitles, EDL, CSV shot list, and final MP4 export.
 - Endless offline theater with Gemma 4 E4B writing on CPU, Supertonic narration on CPU, and Wan rendering on the GPU.
+- Optional bilingual language-learning playback: every story sentence is displayed and spoken first in the selected story language and then in the learner's translation language.
 - Progressive playback: completed scenes appear while later scenes are still being planned and generated.
 - Optional fail-closed educational grounding from local Kiwix ZIM archives.
 - Durable projects made from ordinary JSON, MP4, WAV, SRT, CSV, EDL, and M3U8 files.
@@ -16,6 +17,8 @@ This repository contains the application code only. Model weights, Wikipedia arc
 ## Tested hardware and performance
 
 The reference system is Windows 11 with a Ryzen 9 7950X, 64 GB RAM, and an NVIDIA RTX 5070 12 GB.
+
+For the measured end-to-end baseline, current bottleneck analysis, telemetry limitations, and a reproducible tuning procedure, see [`PERFORMANCE.md`](PERFORMANCE.md). The figures below describe this reference machine and are not universal performance guarantees.
 
 - Gemma 4 E4B Q4_K_M: 15.31 output tokens/second and 146.73 prompt tokens/second at 8 CPU threads; about 4.62 GiB resident RAM.
 - Live Theater planning: 13.29 output tokens/second with the video and speech services available.
@@ -124,6 +127,14 @@ Movie projects retain the original request, screenplay plan, versioned `project.
 Gemma planning, Supertonic speech, Wan rendering, and FFmpeg assembly overlap. Playback waits for synchronized media rather than speaking over a missing visual. The editor first stretches unique forward motion; if narration remains longer, it uses forward/backward coverage instead of silently freezing most of the scene.
 
 The writer stores a structured cast, world, visual style, binding premise contract, and continuity rules. Explicit character counts, objects, actions, threats, and settings in the user's prompt are treated as non-negotiable.
+
+### Language-learning mode
+
+Choose the language of the story under **Narration language**, then choose a different **Language-learning translation**. Gemma keeps the story itself in the first language and produces a validated one-to-one translation for every sentence. The Theater UI displays the paired sentences and Supertonic speaks each original sentence immediately followed by its translation.
+
+The Advanced minimum and maximum word values are total spoken-word budgets. When translation is enabled, the planner reduces source prose before generation to reserve approximately half of that budget for translated speech. This keeps bilingual scenes close to the normal scene duration instead of doubling them or unnaturally accelerating the voice.
+
+Sentence pairs, language codes, translated titles, and the complete configuration are stored in the ordinary session and archive JSON. Version 1 sessions without bilingual fields remain playable and resumable.
 
 ## Development
 
