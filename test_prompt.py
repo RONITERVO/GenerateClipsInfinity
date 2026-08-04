@@ -7,7 +7,10 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from app import _is_local_exit_request, build_prompt, validate_movie_payload, validate_payload, validate_theater_payload
+from app import (
+    _is_local_exit_request, api_theater_live_directive, build_prompt, validate_movie_payload, validate_payload,
+    validate_theater_payload,
+)
 from movie_pipeline import MovieManager
 from theater_pipeline import (
     GpuReleaseError, StoryRuntime, SupertonicRuntime, TheaterError, TheaterManager, split_narration_sentences,
@@ -26,6 +29,23 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(_is_local_exit_request(Request("::1", "release-owned-resources")))
         self.assertFalse(_is_local_exit_request(Request("127.0.0.1", "")))
         self.assertFalse(_is_local_exit_request(Request("192.168.1.20", "release-owned-resources")))
+
+    def test_live_directive_api_rejects_non_object_json(self):
+        async def exercise(payload):
+            class Request:
+                match_info = {"session_id": "session"}
+
+                async def json(self):
+                    return payload
+
+            response = await api_theater_live_directive(Request())
+            return response.status, json.loads(response.text)
+
+        for payload in (None, []):
+            with self.subTest(payload=payload):
+                status, body = asyncio.run(exercise(payload))
+                self.assertEqual(status, 400)
+                self.assertEqual(body["error"], "Request body must be a JSON object.")
 
     def test_theater_retries_one_externally_interrupted_ffmpeg_run(self):
         class Process:
@@ -1077,6 +1097,74 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(state["live_directives"][0]["status"], "pending")
         self.assertNotIn("first_applied_scene", state["live_directives"][1])
         self.assertEqual(state["metrics"]["last_live_steering_scene"], 2)
+
+    def test_run_rebinds_workers_without_dropping_prepared_scenes_on_live_steering(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            prepared = [
+                {"number": 2, "title": "Prepared two", "narration_sentences": [{"original": "Two."}]},
+                {"number": 3, "title": "Prepared three", "narration_sentences": [{"original": "Three."}]},
+            ]
+            completed = {"number": 1, "title": "Completed", "path": "scene-1.mp4"}
+            state = {
+                "id": "session",
+                "config": validate_theater_payload({"prompt": "A continuous story", "mode": "story"}),
+                "bible": {"premise": "Keep going"},
+                "story_summary": "Scene one is complete.",
+                "segments": [completed],
+                "planned": [{"number": 1, "title": "Completed"}, *prepared],
+                "metrics": {},
+                "live_directives": [],
+            }
+
+            class Runtime:
+                gpu_available = False
+
+                async def start(self, *_args, **_kwargs):
+                    return None
+
+            async def idle(*_args):
+                await asyncio.Event().wait()
+
+            steering_event = asyncio.Event()
+            steering_event.set()
+            manager.root = root
+            manager.writer = Runtime()
+            manager.supertonic = Runtime()
+            manager.steering_events = {"session": steering_event}
+            manager._save = lambda _state: None
+            manager._planner_loop = idle
+            manager._translation_loop = idle
+            manager._assembly_loop = idle
+            bindings = []
+            original_restore = manager._restore_story_workers
+
+            def track_restore(inner_state, excluded_numbers):
+                result = original_restore(inner_state, excluded_numbers)
+                bindings.append(result)
+                return result
+
+            manager._restore_story_workers = track_restore
+            rebuilt_ready_numbers = []
+
+            async def inspect_rebuilt_queue(queue, _translation_task):
+                rebuilt_ready_numbers.extend(item["number"] for item in list(queue._queue))
+                raise asyncio.CancelledError
+
+            manager._next_planned_scene = inspect_rebuilt_queue
+            with self.assertRaises(asyncio.CancelledError):
+                await manager._run(state)
+            return state, steering_event, bindings, rebuilt_ready_numbers, completed
+
+        with tempfile.TemporaryDirectory() as directory:
+            state, event, bindings, ready_numbers, completed = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(state["segments"], [completed])
+        self.assertFalse(event.is_set())
+        self.assertEqual(ready_numbers, [2, 3])
+        self.assertEqual(len(bindings), 2)
+        self.assertIsNot(bindings[0][0], bindings[1][0])
+        self.assertIsNot(bindings[0][1], bindings[1][1])
+        self.assertTrue(all(task.done() for binding in bindings for task in binding[2:]))
 
     def test_delayed_directive_preserves_buffer_while_fast_directive_wakes_pipeline(self):
         async def exercise(root: Path):

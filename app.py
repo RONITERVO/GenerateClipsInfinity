@@ -750,6 +750,8 @@ async def api_theater_resume(request: web.Request) -> web.Response:
 async def api_theater_live_directive(request: web.Request) -> web.Response:
     try:
         raw = await request.json()
+        if not isinstance(raw, dict):
+            raise ValueError("Request body must be a JSON object.")
         return web.json_response(THEATER.add_live_directive(
             request.match_info["session_id"], raw.get("text", ""), str(raw.get("scope", "next_scene")),
             str(raw.get("delivery", "after_buffer")),
