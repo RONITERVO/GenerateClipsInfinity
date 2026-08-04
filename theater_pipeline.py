@@ -90,6 +90,17 @@ def split_narration_sentences(text: str) -> list[str]:
     return sentences
 
 
+def spoken_word_count(text: str, language: str = "en") -> int:
+    """Count stable duration units without treating unspaced Japanese as one word."""
+    value = str(text)
+    if str(language).lower() == "ja":
+        japanese = re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", value)
+        remainder = re.sub(r"[\u3040-\u30ff\u3400-\u9fff]", " ", value)
+        latin_words = re.findall(r"[^\W_]+(?:['’-][^\W_]+)*", remainder, flags=re.UNICODE)
+        return math.ceil(len(japanese) / 2) + len(latin_words)
+    return len(re.findall(r"[^\W_]+(?:['’-][^\W_]+)*", value, flags=re.UNICODE))
+
+
 class StoryRuntime:
     GEMMA4_E4B_ALIAS = "gemma4-e4b-theater"
 
@@ -105,9 +116,23 @@ class StoryRuntime:
         self.model_alias = self.GEMMA4_E4B_ALIAS
         self.model_label = "Gemma 4 E4B Q4_K_M"
         # Measured fastest decoding on this Ryzen 9 7950X: 15.31 t/s.
-        # Eight threads leave the other physical cores for TTS and FFmpeg.
+        # Eight threads leave the other physical cores for TTS and FFmpeg. Two
+        # slots let the next story plan overlap the current translation. llama.cpp
+        # divides the configured context across slots, so keep 16K per request.
         self.threads = 8
+        self.parallel_slots = 2
+        self.context_tokens_per_slot = 16384
         self.sampling = {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "presence_penalty": 0.0}
+
+    def _server_args(self, server: Path) -> list[str]:
+        return [
+            str(server), "-m", str(self.model), "--alias", self.model_alias,
+            "--host", "127.0.0.1", "--port", "8083", "-ngl", "0",
+            "-t", str(self.threads), "-tb", str(self.threads),
+            "-c", str(self.context_tokens_per_slot * self.parallel_slots),
+            "--parallel", str(self.parallel_slots), "--batch-size", "512", "--ubatch-size", "128",
+            "--no-mmap", "--jinja", "--reasoning", "off", "--metrics",
+        ]
 
     async def healthy(self) -> bool:
         try:
@@ -136,13 +161,7 @@ class StoryRuntime:
                     f"{self.model} and the llama.cpp server at {server}."
                 )
             log_dir.mkdir(parents=True, exist_ok=True)
-            args = [
-                str(server), "-m", str(self.model), "--alias", self.model_alias,
-                "--host", "127.0.0.1", "--port", "8083", "-ngl", "0",
-                "-t", str(self.threads), "-tb", str(self.threads), "-c", "16384", "--parallel", "1",
-                "--batch-size", "512", "--ubatch-size", "128", "--no-mmap",
-                "--jinja", "--reasoning", "off", "--metrics",
-            ]
+            args = self._server_args(server)
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             env = os.environ.copy()
             env.update({
@@ -262,11 +281,12 @@ class SupertonicRuntime:
             raise TheaterError("Supertonic 3 did not become ready within 45 seconds.")
 
     async def synthesize(
-        self, text: str, output: Path, *, voice: str, language: str,
+        self, text: str, output: Path, *, voice: str, language: str, speed: float = 1.05,
     ) -> float:
         started = time.perf_counter()
         body = {
-            "text": text, "voice": voice, "lang": language, "speed": 1.05,
+            "text": text, "voice": voice, "lang": language,
+            "speed": round(max(0.90, min(1.10, float(speed))), 3),
             "steps": 8, "silence_duration": 0.22, "response_format": "wav",
         }
         async with ClientSession(timeout=ClientTimeout(total=300)) as session:
@@ -302,12 +322,12 @@ class SupertonicRuntime:
 
     async def synthesize_alternating(
         self, pairs: list[dict[str, str]], output: Path, *, voice: str,
-        original_language: str, translation_language: str,
+        original_language: str, translation_language: str, speed: float = 1.05,
     ) -> float:
         """Speak each source sentence immediately followed by its translation."""
         if not translation_language:
             text = " ".join(str(pair.get("original", "")).strip() for pair in pairs).strip()
-            return await self.synthesize(text, output, voice=voice, language=original_language)
+            return await self.synthesize(text, output, voice=voice, language=original_language, speed=speed)
         started = time.perf_counter()
         part_dir = output.parent / f".{output.stem}_parts"
         part_dir.mkdir(parents=True, exist_ok=True)
@@ -323,7 +343,7 @@ class SupertonicRuntime:
                     ("translation", translated, translation_language),
                 ):
                     part = part_dir / f"{index:03d}_{suffix}.wav"
-                    await self.synthesize(text, part, voice=voice, language=language)
+                    await self.synthesize(text, part, voice=voice, language=language, speed=speed)
                     parts.append(part)
             await asyncio.to_thread(self._concatenate_wavs, parts, output)
         finally:
@@ -474,6 +494,12 @@ class KiwixRuntime:
 
 class TheaterManager:
     ACTIVE_STATUSES = {"starting", "planning", "generating", "narrating", "buffering", "running"}
+    COVERAGE_TARGET = 1.08
+    DEFAULT_TTS_SPEED = 1.05
+    MIN_TTS_SPEED = 0.96
+    MAX_TTS_SPEED = 1.05
+    DEFAULT_MONOLINGUAL_SECONDS_PER_WORD = 0.32
+    DEFAULT_BILINGUAL_SECONDS_PER_WORD = 0.53
     LANGUAGE_NAMES = {
         "ar": "Arabic", "bg": "Bulgarian", "hr": "Croatian", "cs": "Czech", "da": "Danish",
         "nl": "Dutch", "en": "English", "et": "Estonian", "fi": "Finnish (suomi)", "fr": "French",
@@ -485,7 +511,7 @@ class TheaterManager:
     }
     CINEMA_DEFAULTS = {
         "width": 480, "height": 272, "frames": 81, "fps": 16,
-        "min_words": 220, "max_words": 600, "max_slow": 8.0,
+        "min_words": 80, "max_words": 110, "max_slow": 8.0,
     }
     # Kept only so existing archived sessions remain resumable after the preset UI was removed.
     LEGACY_QUALITY = {
@@ -616,7 +642,15 @@ class TheaterManager:
             "status": "starting", "message": f"Loading {self.writer.model_label} into system RAM...",
             "config": config, "title": None, "bible": None, "planned": [], "segments": [],
             "current_scene": 0, "total_duration": 0.0, "buffer_seconds": 0.0,
-            "metrics": {"planner_tps": 0.0, "production_ema": 0.0, "coverage_ratio": 0.0},
+            "metrics": {
+                "planner_tps": 0.0, "production_ema": 0.0, "coverage_ratio": 0.0,
+                "writer_parallel_slots": self.writer.parallel_slots,
+                "parallel_translation": bool(self.translation_language(config)),
+                "gpu_feed_wait_seconds": 0.0,
+                "completion_interval_ema": 0.0, "speech_seconds_per_word_ema": 0.0,
+                "spoken_word_multiplier_ema": 0.0, "last_narration_speed": self.DEFAULT_TTS_SPEED,
+                "coverage_target": self.COVERAGE_TARGET,
+            },
         }
         directory = self._dir(session_id)
         for sub in ("raw", "audio", "segments", "work", "logs"):
@@ -754,7 +788,7 @@ class TheaterManager:
         if not facts:
             raise TheaterError("The offline encyclopedia produced no usable factual sentences.")
         fact_menu = "\n".join(f"F{item['id']} [{item['source']}]: {item['text']}" for item in facts)
-        words = len(str(scene.get("narration", "")).split())
+        words = spoken_word_count(scene.get("narration", ""), state["config"].get("language", "en"))
         # Small local writers reliably remove unsupported prose but often make the result
         # substantially tighter. Reject missing facts/fields, not harmless brevity.
         minimum_words = max(12, int(words * 0.50))
@@ -790,7 +824,9 @@ class TheaterManager:
                 required = ("title", "beat", "narration", "visual_action", "camera", "fact_id")
                 if any(not str(checked.get(key, "")).strip() for key in required):
                     raise TheaterError("the factual review returned incomplete data")
-                checked_words = len(str(checked["narration"]).split())
+                checked_words = spoken_word_count(
+                    checked["narration"], state["config"].get("language", "en"),
+                )
                 if checked_words < minimum_words or checked_words > maximum_words:
                     raise TheaterError(
                         f"the sanitized narration had {checked_words} words; required {minimum_words}-{maximum_words}"
@@ -807,6 +843,9 @@ class TheaterManager:
                     {"title": item["title"], "url": item["url"]}
                     for item in state["grounding"]["sources"] if item["title"] == selected["source"]
                 ]
+                if scene.get("planner_metrics"):
+                    checked["planner_metrics"] = scene["planner_metrics"]
+                checked["fact_check_metrics"] = dict(metrics)
                 state["metrics"]["fact_check_tps"] = metrics["tokens_per_second"]
                 return checked
             except Exception as exc:
@@ -827,6 +866,9 @@ class TheaterManager:
         scene["translation_language"] = target_language
         if not target_language:
             scene["narration_sentences"] = [{"original": sentence} for sentence in originals]
+            scene["source_word_count"] = spoken_word_count(scene.get("narration", ""), source_language)
+            scene["translation_word_count"] = 0
+            scene["total_spoken_words"] = scene["source_word_count"]
             return scene
 
         numbered = [{"id": index, "text": sentence} for index, sentence in enumerate(originals, 1)]
@@ -870,7 +912,17 @@ class TheaterManager:
                     aligned.append({"original": original, "translation": text})
                 scene["translated_title"] = translated_title
                 scene["narration_sentences"] = aligned
+                scene["source_word_count"] = sum(
+                    spoken_word_count(pair["original"], source_language) for pair in aligned
+                )
+                scene["translation_word_count"] = sum(
+                    spoken_word_count(pair["translation"], target_language) for pair in aligned
+                )
+                scene["total_spoken_words"] = scene["source_word_count"] + scene["translation_word_count"]
+                scene["translation_metrics"] = dict(metrics)
                 state["metrics"]["translation_tps"] = metrics["tokens_per_second"]
+                state["metrics"]["translation_elapsed_seconds"] = metrics["elapsed_seconds"]
+                state["metrics"]["translation_prompt_tokens"] = metrics["prompt_tokens"]
                 return scene
             except (TheaterError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
@@ -880,6 +932,12 @@ class TheaterManager:
         config = state["config"]
         language_name = self.LANGUAGE_NAMES.get(config.get("language", "en"), config.get("language", "en"))
         minimum_words, maximum_words = self.narration_word_limits(config)
+        opening_maximum = min(maximum_words, minimum_words + 80)
+        opening_sentences = max(3, min(10, math.ceil(minimum_words / 7)))
+        opening_sentence_minimum = max(4, math.ceil(minimum_words / opening_sentences))
+        opening_sentence_maximum = max(
+            opening_sentence_minimum, math.floor(opening_maximum / opening_sentences),
+        )
         request = (
             f"Create an endless story from this seed: {config['prompt']}\n"
             f"Write every natural-language value only in {language_name}; English is forbidden except for JSON keys.\n"
@@ -888,7 +946,9 @@ class TheaterManager:
             "every explicitly requested main character and the immediate central situation or threat. Do not add a rule "
             "that postpones something the seed says is already happening. Give every recurring character a stable name, "
             "role and visual appearance.\n"
-            f"Write {minimum_words}-{min(maximum_words, minimum_words + 80)} narration words for scene 1.\n"
+            f"Write {minimum_words}-{opening_maximum} narration words for scene 1. This is a hard playback-duration "
+            f"budget; use exactly {opening_sentences} complete sentences with {opening_sentence_minimum}-"
+            f"{opening_sentence_maximum} words each and no recap or filler.\n"
             "Return {title,bible:{protagonists:[{name,role,appearance}],world,visual_style,premise_contract:[...],"
             "continuity_rules:[...]},"
             "story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}}. "
@@ -914,20 +974,62 @@ class TheaterManager:
         if any(key not in bible for key in required_bible):
             raise TheaterError("The local writer's story bible did not preserve the full premise contract.")
         value["scene"] = self._scene_object(value["scene"], "bootstrap")
+        value["scene"]["planner_metrics"] = dict(metrics)
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
         return value
 
+    def _target_total_words(self, state: dict[str, Any]) -> int:
+        """Translate measured completed-scene cadence into a bounded speech budget."""
+        quality = self.quality_settings(state["config"])
+        minimum, maximum = int(quality["min_words"]), int(quality["max_words"])
+        metrics = state.setdefault("metrics", {})
+        cadence = float(metrics.get("completion_interval_ema") or metrics.get("production_ema") or 0)
+        if not cadence:
+            return minimum
+        bilingual = bool(self.translation_language(state["config"]))
+        fallback = (
+            self.DEFAULT_BILINGUAL_SECONDS_PER_WORD if bilingual
+            else self.DEFAULT_MONOLINGUAL_SECONDS_PER_WORD
+        )
+        seconds_per_word = max(0.08, float(metrics.get("speech_seconds_per_word_ema") or fallback))
+        target = round(cadence * self.COVERAGE_TARGET / seconds_per_word)
+        return int(max(minimum, min(maximum, target)))
+
     def _target_words(self, state: dict[str, Any]) -> int:
+        minimum, maximum = self.narration_word_limits(state["config"])
+        metrics = state.setdefault("metrics", {})
+        default_multiplier = 2.1 if self.translation_language(state["config"]) else 1.0
+        multiplier = max(1.0, min(3.5, float(metrics.get("spoken_word_multiplier_ema") or default_multiplier)))
+        target = round(self._target_total_words(state) / multiplier)
+        return int(max(minimum, min(maximum, target)))
+
+    def _narration_request_limits(self, state: dict[str, Any]) -> tuple[int, int]:
+        """Stay near the live target without leaving the configured word budget."""
         minimum_words, maximum_words = self.narration_word_limits(state["config"])
-        production = float(state["metrics"].get("production_ema") or 0)
-        if not production:
-            return minimum_words
-        # Measured F3 narration is about 2.7-3.5 words/second. Target ~30% playback headroom.
-        speech_multiplier = 2.1 if self.translation_language(state["config"]) else 1.0
-        return int(max(minimum_words, min(maximum_words, production * 4.6 / speech_multiplier)))
+        words = self._target_words(state)
+        margin = min(8, max(3, math.ceil((maximum_words - minimum_words) * 0.20)))
+        return max(minimum_words, words - margin), min(maximum_words, words + margin)
+
+    def _narration_speed(self, state: dict[str, Any], scene: dict[str, Any]) -> float:
+        """Use bounded voice pacing only to correct the residual duration error."""
+        metrics = state.setdefault("metrics", {})
+        cadence = float(metrics.get("completion_interval_ema") or metrics.get("production_ema") or 0)
+        seconds_per_word = float(metrics.get("speech_seconds_per_word_ema") or 0)
+        words = int(scene.get("total_spoken_words") or 0)
+        previous_speed = float(metrics.get("last_narration_speed") or self.DEFAULT_TTS_SPEED)
+        if not cadence or not seconds_per_word or not words:
+            return self.DEFAULT_TTS_SPEED
+        target_duration = cadence * self.COVERAGE_TARGET
+        predicted_duration = words * seconds_per_word
+        requested = previous_speed * predicted_duration / max(0.1, target_duration)
+        return round(max(self.MIN_TTS_SPEED, min(self.MAX_TTS_SPEED, requested)), 3)
 
     async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
         words = self._target_words(state)
+        request_minimum, request_maximum = self._narration_request_limits(state)
+        sentence_count = max(3, min(10, math.ceil(words / 7)))
+        sentence_minimum = max(4, math.ceil(request_minimum / sentence_count))
+        sentence_maximum = max(sentence_minimum, math.floor(request_maximum / sentence_count))
         language = state["config"].get("language", "en")
         language_name = self.LANGUAGE_NAMES.get(language, language)
         prior = [{"number": s["number"], "title": s["title"], "beat": s["beat"], "visual_action": s["visual_action"]} for s in recent[-10:]]
@@ -936,13 +1038,19 @@ class TheaterManager:
             f"Story bible: {json.dumps(state['bible'], ensure_ascii=False)}\n"
             f"Current story summary: {state.get('story_summary')}\nRecent scenes: {json.dumps(prior, ensure_ascii=False)}\n"
             f"Write every natural-language value only in {language_name}; do not switch to English. "
-            f"Create scene {number} with {max(12, words - 25)}-{max(12, words + 25)} narration words. "
+            f"Create scene {number} with {request_minimum}-{request_maximum} source-language narration words. "
+            f"This is a hard playback-duration budget: use exactly {sentence_count} complete sentences, make every "
+            f"sentence contain {sentence_minimum}-{sentence_maximum} words and advance the action, and do not use "
+            "recap or filler to reach the range. "
             "It must obey every premise_contract item and continuity rule, follow causally, introduce a new meaningful "
             "development, and remain open-ended. Keep the JSON compact and do not add fields. "
             f"Avoid these prior asset fingerprints: {used_hashes}. Return "
             "{story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}} only.\n\n"
             f"OFFLINE ENCYCLOPEDIA EXCERPTS — use no real-world claims beyond these:\n{self._grounding_text(state)}"
         )
+        repair_reason = str(state.get("metrics", {}).get("planner_repair_reason") or "").strip()
+        if repair_reason:
+            request += f"\nThe previous output was rejected: {repair_reason}. Correct that exact validation failure."
         content, metrics = await self.writer.complete([
             {"role": "system", "content": self._system_prompt(state["config"])},
             {"role": "user", "content": request},
@@ -955,21 +1063,45 @@ class TheaterManager:
         required = ("title", "beat", "narration", "visual_action", "camera")
         if any(not str(scene.get(key, "")).strip() for key in required):
             raise TheaterError(f"The local writer's scene {number} is missing required story fields.")
+        narration_words = spoken_word_count(scene["narration"], language)
+        narration_sentences = split_narration_sentences(scene["narration"])
+        if len(narration_sentences) != sentence_count:
+            raise TheaterError(
+                f"the local writer returned {len(narration_sentences)} narration sentences; "
+                f"the duration plan requires {sentence_count}"
+            )
+        configured_minimum, configured_maximum = self.narration_word_limits(state["config"])
+        safety_minimum = max(8, math.floor(configured_minimum * 0.70))
+        safety_maximum = math.ceil(configured_maximum * 1.30)
+        if narration_words < safety_minimum or narration_words > safety_maximum:
+            raise TheaterError(
+                f"the local writer returned {narration_words} narration words; "
+                f"the safe duration envelope requires {safety_minimum}-{safety_maximum}"
+            )
         scene = await self._verify_scene(state, scene)
-        scene = await self._prepare_narration(state, scene)
         fingerprint_text = f"{scene['beat']}|{scene['visual_action']}|{scene['camera']}".lower()
         scene["asset_fingerprint"] = hashlib.sha256(fingerprint_text.encode("utf-8")).hexdigest()[:16]
         if scene["asset_fingerprint"] in {s.get("asset_fingerprint") for s in state.get("planned", [])}:
             scene["visual_action"] += f" The action resolves with a unique physical change specific to scene {number}."
             scene["asset_fingerprint"] = hashlib.sha256((fingerprint_text + str(number)).encode()).hexdigest()[:16]
+        scene["planner_metrics"] = {
+            **metrics,
+            "target_total_spoken_words": self._target_total_words(state),
+            "requested_source_words_min": request_minimum,
+            "requested_source_words_max": request_maximum,
+            "accepted_source_words": narration_words,
+            "configured_source_budget_met": configured_minimum <= narration_words <= configured_maximum,
+        }
         state["story_summary"] = str(value.get("story_summary") or state.get("story_summary"))
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
+        state["metrics"]["planner_elapsed_seconds"] = metrics["elapsed_seconds"]
+        state["metrics"]["planner_prompt_tokens"] = metrics["prompt_tokens"]
         return scene
 
     async def _planner_loop(self, state: dict[str, Any], queue: asyncio.Queue[dict[str, Any]]) -> None:
         while True:
-            # Keep two complete scene plans ahead so the RTX does not wait for the
-            # CPU writer after finishing a raw clip.
+            # Keep two source-language plans waiting for the translation worker.
+            # A separate bounded ready queue limits total look-ahead downstream.
             while queue.qsize() >= 2:
                 await asyncio.sleep(0.5)
             number = len(state.get("planned", [])) + 1
@@ -980,7 +1112,6 @@ class TheaterManager:
                     scene = dict(self._scene_object(state["bootstrap_scene"], "saved bootstrap"))
                     scene["number"] = 1
                     scene = await self._verify_scene(state, scene)
-                    scene = await self._prepare_narration(state, scene)
                     text = f"{scene.get('beat')}|{scene.get('visual_action')}|{scene.get('camera')}".lower()
                     scene["asset_fingerprint"] = hashlib.sha256(text.encode()).hexdigest()[:16]
                     state.pop("bootstrap_scene", None)
@@ -995,10 +1126,13 @@ class TheaterManager:
                 scene = None
                 for attempt in range(1, 4):
                     try:
+                        state.setdefault("metrics", {})["planner_attempt"] = attempt
                         scene = await self._plan_next(state, number, state.get("planned", []))
+                        state["metrics"].pop("planner_repair_reason", None)
                         break
                     except Exception as exc:
                         last_error = exc
+                        state.setdefault("metrics", {})["planner_repair_reason"] = str(exc)[:300]
                         LOGGER.exception("Local writer scene %s planning attempt %s failed", number, attempt)
                         state["message"] = f"The local writer is repairing scene {number}'s structured plan (attempt {attempt}/3)..."
                         self._save(state)
@@ -1007,9 +1141,41 @@ class TheaterManager:
                     await queue.put({"_error": f"The local writer could not structure scene {number}: {last_error}"})
                     return
             state.setdefault("planned", []).append(scene)
-            state["message"] = "The local model planned the next scene; the CPU writer is staying ahead."
+            state.setdefault("metrics", {})["source_plan_queue"] = queue.qsize() + 1
+            state["message"] = "The local model planned the next scene; translation can run beside the following plan."
             self._save(state)
             await queue.put(scene)
+
+    async def _translation_loop(
+        self, state: dict[str, Any], source_queue: asyncio.Queue[dict[str, Any]],
+        ready_queue: asyncio.Queue[dict[str, Any]], planner_task: asyncio.Task[None],
+    ) -> None:
+        """Prepare narration while the other Gemma slot plans the next scene."""
+        while True:
+            scene = await self._next_planned_scene(source_queue, planner_task)
+            try:
+                if scene.get("_error"):
+                    await ready_queue.put(scene)
+                    return
+                prepared = await self._prepare_narration(state, scene)
+                state["metrics"].update({
+                    "parallel_translation": bool(self.translation_language(state["config"])),
+                    "source_plan_queue": source_queue.qsize(),
+                    "translated_scene_queue": ready_queue.qsize() + 1,
+                })
+                state["message"] = (
+                    f"Scene {prepared['number']} is translation-ready while Gemma continues planning ahead."
+                )
+                self._save(state)
+                await ready_queue.put(prepared)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.exception("Local writer scene %s translation failed", scene.get("number"))
+                await ready_queue.put({"_error": str(exc)})
+                return
+            finally:
+                source_queue.task_done()
 
     @staticmethod
     async def _next_planned_scene(
@@ -1033,6 +1199,22 @@ class TheaterManager:
         if error:
             raise TheaterError(f"The local story planner crashed: {error}") from error
         raise TheaterError("The local story planner stopped before it supplied another scene.")
+
+    @classmethod
+    def _narration_is_prepared(cls, config: dict[str, Any], scene: dict[str, Any]) -> bool:
+        """Identify render-ready saved plans without repeating translation after resume."""
+        pairs = scene.get("narration_sentences")
+        if not isinstance(pairs, list) or not pairs:
+            return False
+        if any(not str(pair.get("original", "")).strip() for pair in pairs if isinstance(pair, dict)):
+            return False
+        if any(not isinstance(pair, dict) for pair in pairs):
+            return False
+        if not cls.translation_language(config):
+            return True
+        return bool(str(scene.get("translated_title", "")).strip()) and all(
+            str(pair.get("translation", "")).strip() for pair in pairs
+        )
 
     def _visual_prompt(self, state: dict[str, Any], scene: dict[str, Any]) -> str:
         bible = state["bible"]
@@ -1085,6 +1267,37 @@ class TheaterManager:
         if code:
             raise TheaterError(f"FFmpeg failed while synchronizing the theater (exit {code}).")
 
+    @classmethod
+    def _visual_sync_filter(
+        cls, raw_duration: float, audio_duration: float, quality: dict[str, Any],
+    ) -> tuple[str, float, bool]:
+        """Build one interpolation/coverage graph so each scene is encoded once."""
+        fps = int(quality["fps"])
+        slow_duration = min(audio_duration, raw_duration * float(quality["max_slow"]))
+        ratio = slow_duration / max(
+            0.05, raw_duration * (int(quality["frames"]) - 1) / int(quality["frames"]),
+        )
+        slow_text = f"{slow_duration:.6f}"
+        base = (
+            f"setpts={ratio:.8f}*PTS,tpad=stop_mode=clone:stop_duration=2,"
+            f"minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir,"
+            f"tpad=stop_mode=clone:stop_duration={slow_text},trim=duration={slow_text},"
+            "setpts=PTS-STARTPTS"
+        )
+        repeated = audio_duration > slow_duration + 0.15
+        if not repeated:
+            return f"[0:v]{base},fps={fps},format=yuv420p[v]", slow_duration, False
+        cycle_frames = max(2, math.ceil(slow_duration * fps) * 2)
+        graph = (
+            f"[0:v]{base},split=2[f][r];"
+            "[r]reverse,setpts=PTS-STARTPTS[rr];"
+            "[f][rr]concat=n=2:v=1:a=0[cycle];"
+            f"[cycle]loop=loop=-1:size={cycle_frames}:start=0,"
+            f"trim=duration={audio_duration:.6f},setpts=PTS-STARTPTS,"
+            f"fps={fps},format=yuv420p[v]"
+        )
+        return graph, slow_duration, True
+
     async def _synchronize(
         self, state: dict[str, Any], scene: dict[str, Any], raw_video: Path, audio: Path,
     ) -> tuple[Path, dict[str, Any]]:
@@ -1098,50 +1311,21 @@ class TheaterManager:
         audio_duration = await self._duration(audio)
         quality = self.quality_settings(state["config"])
         fps = int(quality["fps"])
-        slow_duration = min(audio_duration, raw_duration * float(quality["max_slow"]))
-        ratio = slow_duration / max(0.05, raw_duration * (quality["frames"] - 1) / quality["frames"])
-        stretched = work / f"scene_{number:05d}_stretched.mp4"
-        visual_filter = (
-            f"setpts={ratio:.8f}*PTS,tpad=stop_mode=clone:stop_duration=2,"
-            f"minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir,"
-            f"tpad=stop_mode=clone:stop_duration={slow_duration:.6f},format=yuv420p"
+        visual_filter, slow_duration, repeated = self._visual_sync_filter(
+            raw_duration, audio_duration, quality,
         )
-        await self._run_ffmpeg([
-            ffmpeg, "-y", "-i", str(raw_video), "-vf", visual_filter, "-t", f"{slow_duration:.3f}",
-            "-an", "-threads", "4", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-            "-video_track_timescale", "90000", str(stretched),
-        ], directory / "logs" / "ffmpeg.log")
-
-        repeated = audio_duration > slow_duration + 0.15
-        covered = work / f"scene_{number:05d}_covered.mp4"
-        if repeated:
-            pingpong = work / f"scene_{number:05d}_pingpong.mp4"
-            await self._run_ffmpeg([
-                ffmpeg, "-y", "-i", str(stretched), "-filter_complex",
-                "[0:v]split=2[f][r];[r]reverse[rr];[f][rr]concat=n=2:v=1:a=0,format=yuv420p[v]",
-                "-map", "[v]", "-an", "-threads", "4", "-c:v", "libx264", "-preset", "fast", "-crf", "20", str(pingpong),
-            ], directory / "logs" / "ffmpeg.log")
-            await self._run_ffmpeg([
-                ffmpeg, "-y", "-stream_loop", "-1", "-i", str(pingpong), "-vf",
-                f"trim=duration={audio_duration:.6f},setpts=PTS-STARTPTS,fps={fps},format=yuv420p",
-                "-t", f"{audio_duration:.3f}", "-an", "-threads", "4", "-c:v", "libx264",
-                "-preset", "medium", "-crf", "20", "-video_track_timescale", "90000", str(covered),
-            ], directory / "logs" / "ffmpeg.log")
-        else:
-            await self._run_ffmpeg([
-                ffmpeg, "-y", "-i", str(stretched), "-vf",
-                f"tpad=stop_mode=clone:stop_duration={audio_duration:.6f},fps={fps},format=yuv420p",
-                "-t", f"{audio_duration:.3f}", "-an", "-threads", "4", "-c:v", "libx264",
-                "-preset", "medium", "-crf", "20", "-video_track_timescale", "90000", str(covered),
-            ], directory / "logs" / "ffmpeg.log")
-
         segment = directory / "segments" / f"scene_{number:05d}.mp4"
+        staged = work / f"scene_{number:05d}_synchronized.mp4"
         await self._run_ffmpeg([
-            ffmpeg, "-y", "-i", str(covered), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0",
-            "-t", f"{audio_duration:.3f}", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+            ffmpeg, "-y", "-i", str(raw_video), "-i", str(audio),
+            "-filter_complex", visual_filter, "-map", "[v]", "-map", "1:a:0",
+            "-t", f"{audio_duration:.3f}", "-threads", "4", "-c:v", "libx264",
+            "-preset", "medium", "-crf", "20", "-video_track_timescale", "90000",
+            "-c:a", "aac", "-b:a", "160k",
             "-af", f"afade=t=in:st=0:d=0.08,afade=t=out:st={max(0.05,audio_duration-0.16):.6f}:d=0.14",
-            "-movflags", "+faststart", str(segment),
+            "-movflags", "+faststart", str(staged),
         ], directory / "logs" / "ffmpeg.log")
+        await asyncio.to_thread(staged.replace, segment)
         return segment, {
             "raw_video_duration": round(raw_duration, 3), "duration": round(audio_duration, 3),
             "slow_duration": round(slow_duration, 3), "motion_repeated": repeated,
@@ -1162,11 +1346,14 @@ class TheaterManager:
         translation_language = self.translation_language(state["config"])
         if translation_language and any(not str(pair.get("translation", "")).strip() for pair in pairs):
             raise TheaterError(f"Scene {number} is missing an aligned translation and cannot be narrated safely.")
+        narration_speed = self._narration_speed(state, scene)
+        scene["narration_speed"] = narration_speed
         tts_task = asyncio.create_task(self.supertonic.synthesize_alternating(
             pairs, audio_path,
             voice=str(state["config"].get("voice", "M1")),
             original_language=str(state["config"].get("language", "en")),
             translation_language=translation_language,
+            speed=narration_speed,
         ))
         try:
             async with self.controller.workflow_lock:
@@ -1222,16 +1409,25 @@ class TheaterManager:
         assembly_seconds = time.perf_counter() - assembly_started
         cycle_seconds = time.perf_counter() - float(work_item["cycle_started"])
         relative = str(segment.relative_to(self.output_root)).replace("\\", "/")
+        completed_at = time.time()
         entry = {
             "number": number, "title": scene["title"], "beat": scene["beat"],
             "narration": scene["narration"], "learning_point": scene.get("learning_point", ""),
             "translated_title": scene.get("translated_title", ""),
             "narration_sentences": scene.get("narration_sentences", []),
+            "source_word_count": scene.get("source_word_count"),
+            "translation_word_count": scene.get("translation_word_count"),
+            "total_spoken_words": scene.get("total_spoken_words"),
+            "narration_speed": scene.get("narration_speed", self.DEFAULT_TTS_SPEED),
+            "planner_metrics": scene.get("planner_metrics", {}),
+            "translation_metrics": scene.get("translation_metrics", {}),
+            "fact_check_metrics": scene.get("fact_check_metrics", {}),
+            "gpu_feed_wait_seconds": round(float(scene.get("gpu_feed_wait_seconds") or 0), 3),
             "source_language": scene.get("source_language", state["config"].get("language", "en")),
             "translation_language": scene.get("translation_language", ""),
             "sources": scene.get("sources", []),
             "visual_action": scene["visual_action"], "path": relative,
-            "raw_video_path": work_item["video_rel"], "audio_path": work_item["audio_rel"], "created": time.time(),
+            "raw_video_path": work_item["video_rel"], "audio_path": work_item["audio_rel"], "created": completed_at,
             "asset_fingerprint": scene["asset_fingerprint"], **sync,
             "production_seconds": round(cycle_seconds, 3),
             "video_generation_seconds": round(float(work_item["video_seconds"]), 3),
@@ -1240,17 +1436,48 @@ class TheaterManager:
         }
         state.setdefault("segments", []).append(entry)
         state["total_duration"] = round(sum(float(item["duration"]) for item in state["segments"]), 3)
-        pipeline_seconds = float(work_item["ready_seconds"])
-        previous = float(state["metrics"].get("production_ema") or 0)
-        ema = pipeline_seconds if not previous else previous * 0.65 + pipeline_seconds * 0.35
+        previous_entry = state["segments"][-2] if len(state["segments"]) > 1 else None
+        run_started_at = float(state.get("metrics", {}).get("run_started_at") or 0)
+        previous_is_current_run = bool(
+            previous_entry and (not run_started_at or float(previous_entry["created"]) >= run_started_at)
+        )
+        completion_interval = (
+            completed_at - float(previous_entry["created"]) if previous_is_current_run
+            else cycle_seconds
+        )
+        metrics = state.setdefault("metrics", {})
+        previous_interval = float(metrics.get("completion_interval_ema") or 0)
+        interval_ema = (
+            completion_interval if not previous_interval
+            else previous_interval * 0.65 + completion_interval * 0.35
+        )
+        total_words = int(entry.get("total_spoken_words") or 0)
+        source_words = int(entry.get("source_word_count") or 0)
+        seconds_per_word = float(entry["duration"]) / total_words if total_words else 0.0
+        previous_spw = float(metrics.get("speech_seconds_per_word_ema") or 0)
+        spw_ema = (
+            seconds_per_word if not previous_spw else previous_spw * 0.65 + seconds_per_word * 0.35
+        ) if seconds_per_word else previous_spw
+        multiplier = total_words / source_words if source_words else 1.0
+        previous_multiplier = float(metrics.get("spoken_word_multiplier_ema") or 0)
+        multiplier_ema = (
+            multiplier if not previous_multiplier else previous_multiplier * 0.65 + multiplier * 0.35
+        )
         state["metrics"].update({
-            "production_ema": round(ema, 3),
-            "coverage_ratio": round(float(entry["duration"]) / max(0.1, pipeline_seconds), 3),
+            "production_ema": round(interval_ema, 3),
+            "completion_interval_ema": round(interval_ema, 3),
+            "last_completion_interval_seconds": round(completion_interval, 3),
+            "coverage_ratio": round(float(entry["duration"]) / max(0.1, interval_ema), 3),
+            "speech_seconds_per_word_ema": round(spw_ema, 5),
+            "spoken_word_multiplier_ema": round(multiplier_ema, 3),
+            "last_narration_speed": float(entry["narration_speed"]),
+            "coverage_target": self.COVERAGE_TARGET,
             "last_video_seconds": round(float(work_item["video_seconds"]), 3),
             "last_tts_seconds": round(float(work_item["tts_seconds"]), 3),
             "last_assembly_seconds": round(assembly_seconds, 3),
             "parallel_planner": True, "continuous_gpu_pipeline": True,
         })
+        state["metrics"]["target_total_spoken_words"] = self._target_total_words(state)
         state.pop("assembling_scene", None)
         if state.get("rendering_scene"):
             state["status"] = "generating"
@@ -1269,11 +1496,18 @@ class TheaterManager:
                 queue.task_done()
 
     async def _run(self, state: dict[str, Any]) -> None:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
+        # A stopped session may contain the normal three queued scenes plus the
+        # scene that was rendering when cancellation arrived. Size resume queues
+        # for that finite saved set so restoration cannot block before workers start.
+        resume_capacity = max(3, len(state.get("planned", [])) + 1)
+        source_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=resume_capacity)
+        ready_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=resume_capacity)
         assembly_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
         planner_task: asyncio.Task[None] | None = None
+        translation_task: asyncio.Task[None] | None = None
         assembly_task: asyncio.Task[None] | None = None
         try:
+            state.setdefault("metrics", {})["run_started_at"] = time.time()
             state.update(status="starting", message="Loading the CPU writer, neural voice, and offline sources...")
             self._save(state)
             startup = [
@@ -1310,8 +1544,12 @@ class TheaterManager:
             produced_numbers = {int(item["number"]) for item in state.get("segments", [])}
             for saved_scene in state.get("planned", []):
                 if int(saved_scene["number"]) not in produced_numbers:
-                    await queue.put(saved_scene)
-            planner_task = asyncio.create_task(self._planner_loop(state, queue))
+                    target_queue = ready_queue if self._narration_is_prepared(state["config"], saved_scene) else source_queue
+                    await target_queue.put(saved_scene)
+            planner_task = asyncio.create_task(self._planner_loop(state, source_queue))
+            translation_task = asyncio.create_task(
+                self._translation_loop(state, source_queue, ready_queue, planner_task)
+            )
             assembly_task = asyncio.create_task(self._assembly_loop(state, assembly_queue))
             while True:
                 if assembly_task.done():
@@ -1319,11 +1557,20 @@ class TheaterManager:
                     if error:
                         raise TheaterError(f"The scene assembly worker failed: {error}") from error
                     raise TheaterError("The scene assembly worker stopped unexpectedly.")
-                scene = await self._next_planned_scene(queue, planner_task)
+                ready_wait_started = time.perf_counter()
+                scene = await self._next_planned_scene(ready_queue, translation_task)
+                ready_wait_seconds = time.perf_counter() - ready_wait_started
                 if scene.get("_error"):
                     raise TheaterError(scene["_error"])
                 if any(int(item["number"]) == int(scene["number"]) for item in state.get("segments", [])):
                     continue
+                scene["gpu_feed_wait_seconds"] = round(ready_wait_seconds, 3)
+                state["metrics"]["last_gpu_feed_wait_seconds"] = round(ready_wait_seconds, 3)
+                state["metrics"]["gpu_feed_wait_seconds"] = round(
+                    float(state["metrics"].get("gpu_feed_wait_seconds") or 0) + ready_wait_seconds,
+                    3,
+                )
+                state["metrics"]["translated_scene_queue"] = ready_queue.qsize()
                 work_item = await self._render_scene(state, scene)
                 if assembly_task.done():
                     error = assembly_task.exception()
@@ -1332,16 +1579,22 @@ class TheaterManager:
                     raise TheaterError("The scene assembly worker stopped unexpectedly.")
                 await assembly_queue.put(work_item)
         except asyncio.CancelledError:
-            for child in (planner_task, assembly_task):
+            for child in (planner_task, translation_task, assembly_task):
                 if child:
                     child.cancel()
-            await asyncio.gather(*(child for child in (planner_task, assembly_task) if child), return_exceptions=True)
+            await asyncio.gather(
+                *(child for child in (planner_task, translation_task, assembly_task) if child),
+                return_exceptions=True,
+            )
             raise
         except Exception as exc:
-            for child in (planner_task, assembly_task):
+            for child in (planner_task, translation_task, assembly_task):
                 if child:
                     child.cancel()
-            await asyncio.gather(*(child for child in (planner_task, assembly_task) if child), return_exceptions=True)
+            await asyncio.gather(
+                *(child for child in (planner_task, translation_task, assembly_task) if child),
+                return_exceptions=True,
+            )
             LOGGER.exception("Theater session %s failed", state["id"])
             state["status"] = "failed"
             state["message"] = str(exc)

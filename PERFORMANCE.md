@@ -22,7 +22,7 @@ The current configuration favors long-term stability on a 12 GB GPU over maximum
 
 During the reference bilingual session, the system produced about **67 seconds of playable movie every 60 seconds of wall time**. This is approximately **1.12× real time**. It is enough to maintain an endless stream once the initial buffer exists, but it is not a large safety margin.
 
-The present steady-state bottleneck is **Gemma story planning plus sentence translation**, not video rendering, speech synthesis, storage, or total available memory. GPU utilization reaches 100% during sampling but falls while the application waits for the next structured bilingual scene. That idle interval is expected under the current CPU-planning architecture.
+The captured steady-state bottleneck was **Gemma story planning plus sentence translation**, not video rendering, speech synthesis, storage, or total available memory. GPU utilization reached 100% during sampling but fell while the application waited for the next structured bilingual scene. The implementation now overlaps source planning and translation through two bounded Gemma slots; the baseline below predates that change and must not be presented as its measured result.
 
 ## Reference system
 
@@ -46,7 +46,7 @@ PyTorch flash, memory-efficient, and math scaled-dot-product attention backends 
 
 ## Measured workload
 
-The active Theater session used these settings:
+The active Theater session used these settings. It was captured before two-slot parallel translation and therefore remains a comparison baseline:
 
 | Setting | Value |
 | --- | --- |
@@ -129,12 +129,12 @@ The code deliberately separates four kinds of work:
 
 | Worker | Main resource | Current concurrency behavior |
 | --- | --- | --- |
-| Story planner and translator | CPU and RAM | Maintains a bounded queue of upcoming structured scenes |
+| Story planner and translator | CPU and RAM | Separate bounded workers use up to two Gemma slots: translate scene N while planning N+1 |
 | Supertonic | CPU and RAM | Starts speech generation at the same time as Wan |
 | Wan/ComfyUI | GPU, VRAM, some CPU | One serialized workflow at a time |
 | FFmpeg assembler | CPU | Processes the completed scene while the next raw clip can render |
 
-The planner queue and assembly queue are each bounded to prevent unlimited memory growth. The application also serializes ComfyUI submissions through a workflow lock, avoiding two Wan jobs competing for 12 GB of VRAM.
+The source-plan, translated-scene, and assembly queues are each bounded to prevent unlimited memory growth. The application also serializes ComfyUI submissions through a workflow lock, avoiding two Wan jobs competing for 12 GB of VRAM.
 
 Important source locations:
 
@@ -142,11 +142,47 @@ Important source locations:
 - `StoryRuntime`, `SupertonicRuntime`, and `TheaterManager` in [`theater_pipeline.py`](theater_pipeline.py);
 - browser-side buffer calculation and telemetry in [`static/theater.html`](static/theater.html).
 
+### Parallel translation groundwork
+
+Cinema preview now defaults to 80–110 total spoken words per clip. In bilingual mode the initial 2.1× speech reservation converts this to approximately 39–52 source words. After completed narration exists, the controller replaces that assumption with the measured source-to-total expansion ratio for the active language pair. It also learns seconds per spoken word and selects a target inside the saved total-word budget from the actual completed-scene cadence.
+
+The planner produces a source-language scene into a bounded queue. A second worker validates its sentence-aligned translation and places only render-ready scenes into another bounded queue. Meanwhile the planner can use the other llama.cpp slot for the next scene. Saved source plans and translated plans remain distinguishable, so interruption recovery does not repeat finished translations or send incomplete bilingual narration to TTS.
+
+Two simultaneous CPU generations reduce each request's individual token rate but can improve combined throughput and GPU feed continuity. The per-scene archive now records source, translated and total word counts; planner, translation and factual-review timing and prompt sizes; and the wait before Wan receives a render-ready scene. Future benchmarks should use these fields and completed-scene timestamps rather than reconstructing results from mutable session metrics.
+
+The server allocates 32K context across two slots, preserving the earlier 16K ceiling per request. The planner still carries the story bible, rolling story summary, ten recent scene descriptors, and bounded grounding material because continuity may require them. `planner_prompt_tokens`, `translation_prompt_tokens`, stage elapsed time, and queue-depth metrics are saved so future work can identify context-growth slowdown before shortening continuity state. Prefer measured summary compaction over arbitrary truncation.
+
+### Verified Pure story checkpoint
+
+On 2026-08-04 the one-slot and two-slot pipelines were compared over the first ten completed scenes using the same `Beaches around the world` seed, English narration, Spanish translation, M2 voice, 480 × 272 output, 81 source frames, 16 FPS and 80–110 total-word setting. Both used Pure story mode. The two-slot run completed normally and kept two translated scenes ready through scene 10.
+
+| Measurement | One slot | Two slots |
+| --- | ---: | ---: |
+| Completed-scene interval | 40.56 s | 38.79 s |
+| Playable duration | 29.86 s | 32.20 s |
+| End-to-end playback coverage | 0.736× | 0.830× |
+| Wan generation | 41.07 s | 39.54 s |
+| Supertonic | 8.52 s | 9.03 s |
+| FFmpeg assembly | 32.47 s | 33.72 s |
+| Total spoken words | 73.5 | 78.9 |
+
+The important result is queue behavior, not the small wall-time difference: after the opening, Wan did not wait for text. Planning grew from roughly 32 seconds at 928 prompt tokens to roughly 39 seconds at 1,734 tokens, with a 42.5-second observed peak, but the translated-scene buffer absorbed it. Wan therefore remained the steady-state throughput limiter during this checkpoint.
+
+Coverage remained below real time because the model averaged slightly fewer than 80 total words. A later Finnish-to-Spanish run made the failure mode clearer: its last ten scenes averaged 39.82 seconds of playback, 50.31 seconds between completed segments and 73.2 total spoken words, for 0.792× sustained coverage. Merely requesting a range was insufficient because short structured replies still passed field validation.
+
+The current branch asks for a cadence-derived source range and a specific number of meaningful sentences. The sentence count is validated because the installed Gemma follows it reliably. Word count uses a broad 70–130% source safety envelope: stricter rejection was tested and discarded after three consecutive repairs produced 30, 48 and 33 words against a 39–44 request. That policy increased the planner bottleneck without converging. Gross misses still feed their exact failure into the existing maximum-three-attempt repair loop, while every accepted scene records both the requested range and whether it met the configured source budget.
+
+The controller target is 1.08× rather than exactly 1.00× so ordinary scene variance does not immediately consume the playback buffer. Supertonic pacing is a residual controller bounded to 0.96–1.05; it cannot conceal a large duration miss and it is never randomized. In a real late-story smoke test, the revised six-sentence prompt completed in one 42.257-second planner call. Translation produced 34 Finnish plus 49 Spanish words (83 total), the controller selected 0.96 speed, and installed Supertonic generated 52.245 seconds of audio: 1.039× coverage against the captured 50.3-second cadence before any benefit from the one-pass assembler. This is a single-scene functional check, not the required long-run result.
+
+This controller still requires a new long-run measurement after merge. The historical figures above remain baselines, not claimed results for the new policy.
+
+An educational-mode attempt is intentionally excluded from the comparison. Its required factual-review completion added another dependent Gemma pass and produced GPU waits; that path needs a separate benchmark rather than being mixed with Pure story results.
+
 ## Current deliberate tradeoffs
 
 ### CPU-only Gemma
 
-Gemma runs with `-ngl 0`, eight CPU threads, a 16K context, one parallel request slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping it off the GPU allows planning to overlap Wan rendering. Moving it to the GPU would make each LLM request faster in isolation but would force model swapping or serialize it with video generation, so the total pipeline could become slower.
+Gemma runs with `-ngl 0`, eight CPU threads, two parallel request slots, a 32K shared context allocation that preserves 16K per slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping it off the GPU allows planning and translation to overlap Wan rendering. Moving it to the GPU would make each LLM request faster in isolation but would force model swapping or serialize it with video generation, so the total pipeline could become slower.
 
 ### CPU-only Supertonic
 
@@ -169,27 +205,39 @@ The first three settings protect desktop and driver stability while using models
 
 ### High-quality CPU interpolation
 
-FFmpeg uses motion-compensated interpolation and software H.264 encoding. This is intentionally more expensive than frame duplication or simple blending. It preserves more meaningful motion during long narration but makes assembly comparable in duration to Wan generation.
+FFmpeg uses motion-compensated interpolation and software H.264 encoding. This is intentionally more expensive than frame duplication or simple blending. The previous implementation encoded a stretched clip, encoded a forward/reverse intermediate, and encoded the covered result before muxing. The current graph performs stretching, interpolation, reversal, looping, final H.264 encoding and audio muxing in one process. It preserves the same motion policy while eliminating repeated lossy encodes.
 
-## Important telemetry limitation
+An isolated replay of archived scene 13 (`45.558 s`, repeated-motion path) completed the one-pass command plus duration probe in 18.8 seconds; the archived live run recorded 47.513 seconds of assembly. The one-pass output was 16 FPS, 45.5625 seconds long, and measured 0.993823 SSIM against the previous multi-encode segment. This is a targeted implementation check, not an end-to-end throughput claim: the archived timing included concurrent application load, so a new twelve-scene run is still required.
 
-The Theater UI's `coverage_ratio` and `production_ema` are useful short-term indicators, but they do not currently represent full end-to-end scene throughput.
+## Coverage telemetry definition
 
-`coverage_ratio` compares playable duration with the render/TTS readiness interval. It does not include all planner waiting and assembly time. During this capture the UI reported values around 1.5–2.5×, while timestamps between completed archived segments showed a true steady-state value of approximately 1.12×.
+Earlier builds calculated `coverage_ratio` from render/TTS readiness time and excluded assembly and some planner waiting. That historical value must not be compared directly with the current field.
 
-For optimization decisions, use completed-segment timestamps over at least ten scenes. UI coverage should not be quoted as an end-to-end benchmark until its definition changes.
+The current `production_ema` and `completion_interval_ema` use the interval between fully archived playable segments, with the complete first-scene cycle as the initializer. `coverage_ratio` is playable duration divided by that smoothed completed-segment interval. The archive also records the latest raw interval, seconds-per-word estimate, bilingual word multiplier, selected narration speed, and next total-word target. Long-run evaluation should still use at least ten completed-segment timestamps because an EMA is operational control state rather than a benchmark summary.
 
-## Prioritized experiments
+## Prioritized optimization record
 
-The following items are proposals, not completed optimizations. Change one variable at a time and use the validation procedure below.
+Completed measurements and remaining proposals are labeled separately. For unfinished experiments, change one variable at a time and use the validation procedure below.
 
-### Priority 1: Gemma thread and CPU-affinity sweep
+### Completed: Gemma thread-count sweep
 
-**Why:** Planning and translation are the current bottleneck.
+**Why:** Planning and translation were the measured bottleneck, and two-slot overlap changes CPU contention and per-request decoding speed.
 
-Test eight, ten, and twelve Gemma threads. Separately test leaving affinity unrestricted versus pinning Gemma to one Ryzen CCD. Cross-CCD scheduling can increase cache traffic, but Windows may already make better scheduling decisions than a fixed mask.
+The production-shaped two-slot benchmark used a 2,199-token late-story planner request beside a 261-token translation request. Evolving-prompt results were:
 
-**Success condition:** lower complete planner-cycle time without increasing Wan, TTS, or FFmpeg times enough to reduce completed-scene throughput.
+| Threads per slot | Pair wall time | Planner output rate |
+| ---: | ---: | ---: |
+| 4 | 63.903 s | 5.618 tok/s |
+| 6 | 52.867 s | 6.847 tok/s |
+| 8 | 43.501 s | 8.460 tok/s |
+| 10 | 42.710 s | 8.289 tok/s |
+| 12 | 42.687 s | 8.457 tok/s |
+
+Ten and twelve threads produced fewer completion tokens, explaining their small raw wall-time difference; normalized planner throughput did not improve over eight. Eight remains the production setting because it also reserves CPU capacity for Supertonic and the FFmpeg assembler. The second identical repetition was retained in the local benchmark artifact but excluded from this table because full prompt-cache reuse overstates what an evolving story receives.
+
+CPU-affinity pinning remains a separate experiment. Cross-CCD scheduling can increase cache traffic, but Windows may already make better scheduling decisions than a fixed mask.
+
+**Decision rule used:** lower complete planner-cycle time without increasing Wan, TTS, or FFmpeg times enough to reduce completed-scene throughput.
 
 **Risk:** moderate. More LLM threads can interfere with Supertonic and FFmpeg during their overlapping burst.
 
@@ -234,7 +282,6 @@ Benchmark `--preview-method none` against `auto`.
 
 These require code or model-architecture changes and should not be presented as quick tuning:
 
-- plan the next source scene and translate the current scene concurrently through multiple llama slots;
 - run a separate small translation runtime so story planning does not wait for translation;
 - request story and aligned translation in one Gemma completion, accepting a larger validation and repair burden;
 - dynamically move Gemma between CPU and GPU during Wan-idle periods, accepting model-transfer cost and more complex scheduling;
