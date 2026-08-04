@@ -554,6 +554,8 @@ class KiwixRuntime:
 class TheaterManager:
     ACTIVE_STATUSES = {"starting", "planning", "generating", "narrating", "buffering", "running"}
     GPU_BURST_TARGET = 3
+    GPU_REFILL_POLL_SECONDS = 5.0
+    GPU_REFILL_MIN_PREDICTED_WAIT = 12.0
     COVERAGE_TARGET = 1.08
     DEFAULT_TTS_SPEED = 1.05
     MIN_TTS_SPEED = 0.96
@@ -954,10 +956,15 @@ class TheaterManager:
             state.setdefault("metrics", {})["planner_stage"] = "translation"
             state["metrics"]["translation_attempt"] = attempt
             self._save(state)
-            content, metrics = await self.writer.complete([
-                {"role": "system", "content": self._translation_system_prompt(config)},
-                {"role": "user", "content": request},
-            ], max_tokens=min(2200, max(500, len(str(scene["narration"]).split()) * 5 + 250)))
+            state_metrics = state.setdefault("metrics", {})
+            state_metrics["translation_request_started_at"] = time.time()
+            try:
+                content, metrics = await self.writer.complete([
+                    {"role": "system", "content": self._translation_system_prompt(config)},
+                    {"role": "user", "content": request},
+                ], max_tokens=min(2200, max(500, len(str(scene["narration"]).split()) * 5 + 250)))
+            finally:
+                state_metrics.pop("translation_request_started_at", None)
             with (self._dir(state["id"]) / "logs" / "translation_raw.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps({
                     "time": time.time(), "number": scene["number"], "attempt": attempt, "content": content,
@@ -988,6 +995,15 @@ class TheaterManager:
                 scene["translation_metrics"] = dict(metrics)
                 state["metrics"]["translation_tps"] = metrics["tokens_per_second"]
                 state["metrics"]["translation_elapsed_seconds"] = metrics["elapsed_seconds"]
+                if getattr(getattr(self, "writer", None), "profile", "cpu") == "cpu":
+                    previous_translation = float(state["metrics"].get("translation_elapsed_ema") or 0)
+                    state["metrics"]["translation_elapsed_ema"] = round(
+                        metrics["elapsed_seconds"] if not previous_translation
+                        else previous_translation * 0.7 + metrics["elapsed_seconds"] * 0.3,
+                        3,
+                    )
+                else:
+                    state["metrics"]["gpu_translation_elapsed_seconds"] = metrics["elapsed_seconds"]
                 state["metrics"]["translation_prompt_tokens"] = metrics["prompt_tokens"]
                 return scene
             except (TheaterError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -1117,10 +1133,15 @@ class TheaterManager:
         repair_reason = str(state.get("metrics", {}).get("planner_repair_reason") or "").strip()
         if repair_reason:
             request += f"\nThe previous output was rejected: {repair_reason}. Correct that exact validation failure."
-        content, metrics = await self.writer.complete([
-            {"role": "system", "content": self._system_prompt(state["config"])},
-            {"role": "user", "content": request},
-        ], max_tokens=min(1800, words * 3 + 450))
+        state_metrics = state.setdefault("metrics", {})
+        state_metrics["planner_request_started_at"] = time.time()
+        try:
+            content, metrics = await self.writer.complete([
+                {"role": "system", "content": self._system_prompt(state["config"])},
+                {"role": "user", "content": request},
+            ], max_tokens=min(1800, words * 3 + 450))
+        finally:
+            state_metrics.pop("planner_request_started_at", None)
         with (self._dir(state["id"]) / "logs" / "planner_raw.jsonl").open("a", encoding="utf-8") as log:
             log.write(json.dumps({"time": time.time(), "number": number, "content": content}, ensure_ascii=False) + "\n")
         value = _json_object(content)
@@ -1161,6 +1182,15 @@ class TheaterManager:
         state["story_summary"] = str(value.get("story_summary") or state.get("story_summary"))
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
         state["metrics"]["planner_elapsed_seconds"] = metrics["elapsed_seconds"]
+        if getattr(getattr(self, "writer", None), "profile", "cpu") == "cpu":
+            previous_planner = float(state["metrics"].get("planner_elapsed_ema") or 0)
+            state["metrics"]["planner_elapsed_ema"] = round(
+                metrics["elapsed_seconds"] if not previous_planner
+                else previous_planner * 0.7 + metrics["elapsed_seconds"] * 0.3,
+                3,
+            )
+        else:
+            state["metrics"]["gpu_planner_elapsed_seconds"] = metrics["elapsed_seconds"]
         state["metrics"]["planner_prompt_tokens"] = metrics["prompt_tokens"]
         return scene
 
@@ -1191,9 +1221,22 @@ class TheaterManager:
                 last_error: Exception | None = None
                 scene = None
                 for attempt in range(1, 4):
+                    cycle_started = time.perf_counter()
+                    state.setdefault("metrics", {})["planner_cycle_started_at"] = time.time()
                     try:
                         state.setdefault("metrics", {})["planner_attempt"] = attempt
                         scene = await self._plan_next(state, number, state.get("planned", []))
+                        cycle_seconds = time.perf_counter() - cycle_started
+                        state["metrics"]["planner_cycle_seconds"] = round(cycle_seconds, 3)
+                        if getattr(getattr(self, "writer", None), "profile", "cpu") == "cpu":
+                            previous_cycle = float(state["metrics"].get("planner_cycle_ema") or 0)
+                            state["metrics"]["planner_cycle_ema"] = round(
+                                cycle_seconds if not previous_cycle
+                                else previous_cycle * 0.7 + cycle_seconds * 0.3,
+                                3,
+                            )
+                        else:
+                            state["metrics"]["gpu_planner_cycle_seconds"] = round(cycle_seconds, 3)
                         state["metrics"].pop("planner_repair_reason", None)
                         break
                     except Exception as exc:
@@ -1203,6 +1246,8 @@ class TheaterManager:
                         state["message"] = f"The local writer is repairing scene {number}'s structured plan (attempt {attempt}/3)..."
                         self._save(state)
                         await asyncio.sleep(0.5)
+                    finally:
+                        state["metrics"].pop("planner_cycle_started_at", None)
                 if scene is None:
                     await queue.put({"_error": f"The local writer could not structure scene {number}: {last_error}"})
                     return
@@ -1219,16 +1264,30 @@ class TheaterManager:
         """Prepare narration while the other Gemma slot plans the next scene."""
         while True:
             scene = await self._next_planned_scene(source_queue, planner_task)
+            cycle_started = time.perf_counter()
+            state.setdefault("metrics", {})["translation_cycle_started_at"] = time.time()
             try:
                 if scene.get("_error"):
                     await ready_queue.put(scene)
                     return
                 prepared = await self._prepare_narration(state, scene)
-                state["metrics"].update({
+                cycle_seconds = time.perf_counter() - cycle_started
+                cycle_metrics = {
                     "parallel_translation": bool(self.translation_language(state["config"])),
                     "source_plan_queue": source_queue.qsize(),
                     "translated_scene_queue": ready_queue.qsize() + 1,
-                })
+                    "translation_cycle_seconds": round(cycle_seconds, 3),
+                }
+                if getattr(getattr(self, "writer", None), "profile", "cpu") == "cpu":
+                    previous_cycle = float(state["metrics"].get("translation_cycle_ema") or 0)
+                    cycle_metrics["translation_cycle_ema"] = round(
+                        cycle_seconds if not previous_cycle
+                        else previous_cycle * 0.7 + cycle_seconds * 0.3,
+                        3,
+                    )
+                else:
+                    cycle_metrics["gpu_translation_cycle_seconds"] = round(cycle_seconds, 3)
+                state["metrics"].update(cycle_metrics)
                 state["message"] = (
                     f"Scene {prepared['number']} is translation-ready while Gemma continues planning ahead."
                 )
@@ -1241,6 +1300,7 @@ class TheaterManager:
                 await ready_queue.put({"_error": str(exc)})
                 return
             finally:
+                state["metrics"].pop("translation_cycle_started_at", None)
                 source_queue.task_done()
 
     @staticmethod
@@ -1249,22 +1309,25 @@ class TheaterManager:
     ) -> dict[str, Any]:
         """Wait for a scene while also supervising the producer task."""
         get_task = asyncio.create_task(queue.get())
-        done, _ = await asyncio.wait({get_task, planner_task}, return_when=asyncio.FIRST_COMPLETED)
-        if get_task in done:
-            return get_task.result()
+        try:
+            done, _ = await asyncio.wait({get_task, planner_task}, return_when=asyncio.FIRST_COMPLETED)
+            if get_task in done:
+                return get_task.result()
 
-        # Let a queue.put performed immediately before a clean return wake its waiter.
-        await asyncio.sleep(0)
-        if get_task.done():
-            return get_task.result()
-        get_task.cancel()
-        await asyncio.gather(get_task, return_exceptions=True)
-        if planner_task.cancelled():
-            raise asyncio.CancelledError
-        error = planner_task.exception()
-        if error:
-            raise TheaterError(f"The local story planner crashed: {error}") from error
-        raise TheaterError("The local story planner stopped before it supplied another scene.")
+            # Let a queue.put performed immediately before a clean return wake its waiter.
+            await asyncio.sleep(0)
+            if get_task.done():
+                return get_task.result()
+            if planner_task.cancelled():
+                raise asyncio.CancelledError
+            error = planner_task.exception()
+            if error:
+                raise TheaterError(f"The local story planner crashed: {error}") from error
+            raise TheaterError("The local story planner stopped before it supplied another scene.")
+        finally:
+            if not get_task.done():
+                get_task.cancel()
+            await asyncio.gather(get_task, return_exceptions=True)
 
     @classmethod
     def _narration_is_prepared(cls, config: dict[str, Any], scene: dict[str, Any]) -> bool:
@@ -1561,17 +1624,23 @@ class TheaterManager:
             finally:
                 queue.task_done()
 
-    def _pending_prepared_count(self, state: dict[str, Any]) -> int:
+    def _pending_prepared_count(
+        self, state: dict[str, Any], excluded_numbers: set[int] | None = None,
+    ) -> int:
         produced = {int(item["number"]) for item in state.get("segments", [])}
+        produced.update(excluded_numbers or set())
         return sum(
             1 for scene in state.get("planned", [])
             if int(scene["number"]) not in produced
             and self._narration_is_prepared(state["config"], scene)
         )
 
-    async def _fill_story_buffer(self, state: dict[str, Any], target: int) -> int:
+    async def _fill_story_buffer(
+        self, state: dict[str, Any], target: int, excluded_numbers: set[int] | None = None,
+    ) -> int:
         """Use the active writer profile to durably prepare a bounded scene batch."""
         produced = {int(item["number"]) for item in state.get("segments", [])}
+        produced.update(excluded_numbers or set())
         pending = [
             scene for scene in state.get("planned", [])
             if int(scene["number"]) not in produced
@@ -1591,26 +1660,31 @@ class TheaterManager:
             name=f"gpu-burst-translator-{state['id']}",
         )
         try:
-            while self._pending_prepared_count(state) < target:
+            while self._pending_prepared_count(state, excluded_numbers) < target:
                 scene = await self._next_planned_scene(ready_queue, translation_task)
                 if scene.get("_error"):
                     raise TheaterError(scene["_error"])
-                state.setdefault("metrics", {})["gpu_burst_prepared_scenes"] = self._pending_prepared_count(state)
+                state.setdefault("metrics", {})["gpu_burst_prepared_scenes"] = self._pending_prepared_count(
+                    state, excluded_numbers,
+                )
                 self._save(state)
-            return self._pending_prepared_count(state)
+            return self._pending_prepared_count(state, excluded_numbers)
         finally:
             planner_task.cancel()
             translation_task.cancel()
             await asyncio.gather(planner_task, translation_task, return_exceptions=True)
 
-    async def _prime_gpu_story_buffer(self, state: dict[str, Any]) -> int:
-        """Build the opening text buffer on CUDA, then synchronously release VRAM."""
+    async def _prime_gpu_story_buffer(
+        self, state: dict[str, Any], *, reason: str = "opening",
+        excluded_numbers: set[int] | None = None,
+    ) -> int:
+        """Build a bounded text buffer on CUDA, then synchronously release VRAM."""
         metrics = state.setdefault("metrics", {})
         burst_started = time.perf_counter()
         load_started = burst_started
         load_seconds = 0.0
         offload_seconds = 0.0
-        prepared = self._pending_prepared_count(state)
+        prepared = self._pending_prepared_count(state, excluded_numbers)
         async with self.controller.workflow_lock:
             await self.controller.wait_until_idle()
             await self.controller.free_models()
@@ -1618,7 +1692,8 @@ class TheaterManager:
                 state.update(
                     status="planning",
                     message=(
-                        f"Loading {self.writer.model_label} on the RTX GPU to prepare "
+                        f"Loading {self.writer.model_label} on the RTX GPU to "
+                        f"{'refill' if reason == 'adaptive_refill' else 'prepare'} "
                         f"{self.GPU_BURST_TARGET} scenes ahead..."
                     ),
                 )
@@ -1633,7 +1708,9 @@ class TheaterManager:
                         story_summary=bootstrap["story_summary"], bootstrap_scene=bootstrap["scene"],
                     )
                     self._save(state)
-                prepared = await self._fill_story_buffer(state, self.GPU_BURST_TARGET)
+                prepared = await self._fill_story_buffer(
+                    state, self.GPU_BURST_TARGET, excluded_numbers,
+                )
             finally:
                 offload_started = time.perf_counter()
                 try:
@@ -1653,15 +1730,116 @@ class TheaterManager:
                     self.writer.activate("cpu")
                     metrics["gpu_burst_active"] = False
 
+        total_seconds = round(time.perf_counter() - burst_started, 3)
         metrics.update({
             "gpu_burst_completed": True,
             "gpu_burst_prepared_scenes": prepared,
             "gpu_burst_load_seconds": round(load_seconds, 3),
             "gpu_burst_offload_seconds": round(offload_seconds, 3),
-            "gpu_burst_total_seconds": round(time.perf_counter() - burst_started, 3),
+            "gpu_burst_total_seconds": total_seconds,
+            "gpu_burst_count": int(metrics.get("gpu_burst_count") or 0) + 1,
         })
+        if reason == "adaptive_refill":
+            metrics["gpu_refill_count"] = int(metrics.get("gpu_refill_count") or 0) + 1
+        events = list(metrics.get("gpu_burst_events") or [])[-19:]
+        events.append({
+            "reason": reason, "completed_at": time.time(), "prepared_scenes": prepared,
+            "load_seconds": round(load_seconds, 3), "offload_seconds": round(offload_seconds, 3),
+            "total_seconds": total_seconds,
+        })
+        metrics["gpu_burst_events"] = events
         self._save(state)
         return prepared
+
+    def _restore_story_workers(
+        self, state: dict[str, Any], excluded_numbers: set[int],
+    ) -> tuple[
+        asyncio.Queue[dict[str, Any]], asyncio.Queue[dict[str, Any]],
+        asyncio.Task[None], asyncio.Task[None],
+    ]:
+        """Rebuild bounded CPU queues solely from the durable plan archive."""
+        completed = {int(item["number"]) for item in state.get("segments", [])}
+        completed.update(excluded_numbers)
+        pending = [
+            item for item in state.get("planned", [])
+            if int(item["number"]) not in completed
+        ]
+        capacity = max(3, len(pending) + 1)
+        source_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=capacity)
+        ready_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=capacity)
+        for scene in pending:
+            target = ready_queue if self._narration_is_prepared(state["config"], scene) else source_queue
+            target.put_nowait(scene)
+        planner_task = asyncio.create_task(
+            self._planner_loop(state, source_queue), name=f"cpu-planner-{state['id']}",
+        )
+        translation_task = asyncio.create_task(
+            self._translation_loop(state, source_queue, ready_queue, planner_task),
+            name=f"cpu-translator-{state['id']}",
+        )
+        return source_queue, ready_queue, planner_task, translation_task
+
+    @staticmethod
+    async def _cancel_story_workers(
+        planner_task: asyncio.Task[None] | None, translation_task: asyncio.Task[None] | None,
+    ) -> None:
+        workers = [task for task in (planner_task, translation_task) if task]
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    def _predicted_cpu_ready_wait(
+        self, state: dict[str, Any], source_queue: asyncio.Queue[dict[str, Any]],
+    ) -> float:
+        """Estimate the next validated scene wait from live and completed CPU stages."""
+        metrics = state.setdefault("metrics", {})
+        now = time.time()
+        planner_seconds = float(
+            metrics.get("planner_cycle_ema") or metrics.get("planner_elapsed_ema")
+            or metrics.get("planner_elapsed_seconds") or 0
+        )
+        translation_seconds = (
+            float(
+                metrics.get("translation_cycle_ema") or metrics.get("translation_elapsed_ema")
+                or metrics.get("translation_elapsed_seconds") or 0
+            )
+            if self.translation_language(state["config"]) else 0.0
+        )
+        translation_started = float(
+            metrics.get("translation_cycle_started_at") or metrics.get("translation_request_started_at") or 0
+        )
+        planner_started = float(
+            metrics.get("planner_cycle_started_at") or metrics.get("planner_request_started_at") or 0
+        )
+        if translation_started:
+            return max(0.0, translation_seconds - max(0.0, now - translation_started))
+        if source_queue.qsize():
+            return translation_seconds
+        if planner_started:
+            planner_remaining = max(0.0, planner_seconds - max(0.0, now - planner_started))
+            return planner_remaining + translation_seconds
+        return 0.0
+
+    def _should_refill_on_gpu(
+        self, state: dict[str, Any], ready_queue: asyncio.Queue[dict[str, Any]],
+        source_queue: asyncio.Queue[dict[str, Any]],
+    ) -> bool:
+        """Refill only when measured CPU wait is worse than the bounded GPU swap."""
+        metrics = state.setdefault("metrics", {})
+        if (
+            not self.writer.gpu_available or not ready_queue.empty()
+            or metrics.get("gpu_refill_disabled") or metrics.get("gpu_burst_fallback_reason")
+        ):
+            return False
+        predicted = self._predicted_cpu_ready_wait(state, source_queue)
+        measured_burst = float(metrics.get("gpu_burst_total_seconds") or 0)
+        threshold = max(
+            self.GPU_REFILL_MIN_PREDICTED_WAIT,
+            measured_burst * 0.75 if measured_burst else self.GPU_REFILL_MIN_PREDICTED_WAIT,
+        )
+        metrics["gpu_refill_predicted_cpu_wait"] = round(predicted, 3)
+        metrics["gpu_refill_trigger_seconds"] = round(threshold, 3)
+        return predicted >= threshold
 
     async def _run(self, state: dict[str, Any]) -> None:
         planner_task: asyncio.Task[None] | None = None
@@ -1705,6 +1883,7 @@ class TheaterManager:
                         "gpu_burst_active": False,
                         "gpu_burst_completed": False,
                         "gpu_burst_fallback_reason": str(exc)[:500],
+                        "gpu_refill_disabled": True,
                     })
                     state["message"] = "The CUDA preload was unavailable; continuing safely with Gemma on CPU."
                     self._save(state)
@@ -1722,23 +1901,10 @@ class TheaterManager:
                     bootstrap_scene=bootstrap["scene"],
                 )
                 self._save(state)
-            produced_numbers = {int(item["number"]) for item in state.get("segments", [])}
-            pending_count = sum(
-                1 for item in state.get("planned", []) if int(item["number"]) not in produced_numbers
-            )
-            # Size only for the finite resume/burst backlog. Steady-state queues
-            # remain bounded at three even though the durable plan archive grows.
-            resume_capacity = max(3, pending_count + 1)
-            source_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=resume_capacity)
-            ready_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=resume_capacity)
+            rendered_numbers = {int(item["number"]) for item in state.get("segments", [])}
             assembly_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
-            for saved_scene in state.get("planned", []):
-                if int(saved_scene["number"]) not in produced_numbers:
-                    target_queue = ready_queue if self._narration_is_prepared(state["config"], saved_scene) else source_queue
-                    await target_queue.put(saved_scene)
-            planner_task = asyncio.create_task(self._planner_loop(state, source_queue))
-            translation_task = asyncio.create_task(
-                self._translation_loop(state, source_queue, ready_queue, planner_task)
+            source_queue, ready_queue, planner_task, translation_task = self._restore_story_workers(
+                state, rendered_numbers,
             )
             assembly_task = asyncio.create_task(self._assembly_loop(state, assembly_queue))
             while True:
@@ -1748,11 +1914,53 @@ class TheaterManager:
                         raise TheaterError(f"The scene assembly worker failed: {error}") from error
                     raise TheaterError("The scene assembly worker stopped unexpectedly.")
                 ready_wait_started = time.perf_counter()
-                scene = await self._next_planned_scene(ready_queue, translation_task)
+                while True:
+                    if self._should_refill_on_gpu(state, ready_queue, source_queue):
+                        predicted_wait = float(state["metrics"].get("gpu_refill_predicted_cpu_wait") or 0)
+                        await self._cancel_story_workers(planner_task, translation_task)
+                        planner_task = None
+                        translation_task = None
+                        state.update(
+                            status="planning",
+                            message=(
+                                f"The CPU writer predicts a {predicted_wait:.0f}-second wait; "
+                                "using the idle RTX window to refill three scenes..."
+                            ),
+                        )
+                        self._save(state)
+                        try:
+                            await self._prime_gpu_story_buffer(
+                                state, reason="adaptive_refill", excluded_numbers=rendered_numbers,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except GpuReleaseError:
+                            raise
+                        except Exception as exc:
+                            LOGGER.exception("Adaptive CUDA story refill failed; disabling it for this session")
+                            state["metrics"].update({
+                                "gpu_refill_disabled": True,
+                                "gpu_refill_disabled_reason": str(exc)[:500],
+                            })
+                        finally:
+                            state["metrics"]["writer_mode"] = "cpu_sustain"
+                            source_queue, ready_queue, planner_task, translation_task = self._restore_story_workers(
+                                state, rendered_numbers,
+                            )
+                            self._save(state)
+                        continue
+                    try:
+                        scene = await asyncio.wait_for(
+                            self._next_planned_scene(ready_queue, translation_task),
+                            timeout=self.GPU_REFILL_POLL_SECONDS,
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        continue
                 ready_wait_seconds = time.perf_counter() - ready_wait_started
                 if scene.get("_error"):
                     raise TheaterError(scene["_error"])
-                if any(int(item["number"]) == int(scene["number"]) for item in state.get("segments", [])):
+                if int(scene["number"]) in rendered_numbers:
                     continue
                 scene["gpu_feed_wait_seconds"] = round(ready_wait_seconds, 3)
                 state["metrics"]["last_gpu_feed_wait_seconds"] = round(ready_wait_seconds, 3)
@@ -1762,6 +1970,7 @@ class TheaterManager:
                 )
                 state["metrics"]["translated_scene_queue"] = ready_queue.qsize()
                 work_item = await self._render_scene(state, scene)
+                rendered_numbers.add(int(scene["number"]))
                 if assembly_task.done():
                     error = assembly_task.exception()
                     if error:
