@@ -180,9 +180,15 @@ An educational-mode attempt is intentionally excluded from the comparison. Its r
 
 ## Current deliberate tradeoffs
 
-### CPU-only Gemma
+### Hybrid Gemma GPU burst and CPU sustain
 
-Gemma runs with `-ngl 0`, eight CPU threads, two parallel request slots, a 32K shared context allocation that preserves 16K per slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping it off the GPU allows planning and translation to overlap Wan rendering. Moving it to the GPU would make each LLM request faster in isolation but would force model swapping or serialize it with video generation, so the total pipeline could become slower.
+The steady-state writer runs with `-ngl 0`, eight CPU threads, two parallel request slots, a 32K shared context allocation that preserves 16K per slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping this sustaining writer off the GPU allows planning and translation to overlap Wan rendering.
+
+The opening phase now uses an optional bounded CUDA burst when a compatible llama.cpp runtime is installed. It runs the same Gemma 4 E4B GGUF with full layer offload, two 16K slots, F16 KV cache and flash attention. Under the global GPU workflow lock it waits for prior ComfyUI jobs, frees ComfyUI models, prepares at least three translation/TTS-ready scenes, and then waits for the CUDA process to exit before Wan submission can begin. The CPU writer is started after that release and sustains the buffer while Wan renders. This hybrid avoids both the slow CPU-only opening and recurring GPU-swap gaps.
+
+On the reference RTX 5070, the measured warm one-slot late-story planner completed in 3.57-3.60 seconds at 116.7-117.7 output tokens/second end-to-end, versus 45.93 seconds and about 14.1 raw decode tokens/second on CPU. A fresh two-slot planner-plus-translation pair completed in 5.32 seconds. Warm CUDA load-to-health was 2.61-2.70 seconds and VRAM release after termination took 0.24-0.25 seconds. The first cold CUDA cycle required about 35.2 seconds including one-time graph/kernel initialization. Incremental VRAM was about 3.35 GiB for one slot and 3.65-3.87 GiB for two.
+
+Those figures are component benchmarks, not a claim of identical end-to-end theater acceleration. Wan still cannot safely share this 12 GB GPU with resident Gemma. The implementation therefore records `gpu_burst_load_seconds`, `gpu_burst_total_seconds`, `gpu_burst_offload_seconds`, prepared-scene count and any fallback reason in each session. Future changes should compare time to the first two playable scenes and long-run completed-scene cadence; decode tokens per second alone are not sufficient.
 
 ### CPU-only Supertonic
 
@@ -284,7 +290,7 @@ These require code or model-architecture changes and should not be presented as 
 
 - run a separate small translation runtime so story planning does not wait for translation;
 - request story and aligned translation in one Gemma completion, accepting a larger validation and repair burden;
-- dynamically move Gemma between CPU and GPU during Wan-idle periods, accepting model-transfer cost and more complex scheduling;
+- extend the implemented opening/resume GPU burst to an adaptive emergency refill only if long-run telemetry shows the CPU sustaining writer repeatedly exhausts the translated-scene queue; do not add periodic swaps without that evidence;
 - replace the two-model Wan workflow with a model or quantization designed to remain resident on 12 GB VRAM;
 - adopt third-party attention kernels after verifying Blackwell, CUDA 13, PyTorch 2.12, and model-quality compatibility.
 

@@ -8,7 +8,7 @@ This repository contains the application code only. Model weights, Wikipedia arc
 
 - Single Wan 2.2 text-to-video clips with the tested two-stage LightX2V workflow.
 - One-sentence movie planning, progressive generation, editable per-clip timing, subtitles, EDL, CSV shot list, and final MP4 export.
-- Endless offline theater with Gemma 4 E4B writing on CPU, Supertonic narration on CPU, and Wan rendering on the GPU.
+- Endless offline theater with a bounded Gemma GPU opening burst, Gemma/Supertonic sustaining work on CPU, and Wan rendering on the GPU.
 - Optional bilingual language-learning playback: every story sentence is displayed and spoken first in the selected story language and then in the learner's translation language.
 - Progressive playback: completed scenes appear while later scenes are still being planned and generated.
 - Optional fail-closed educational grounding from local Kiwix ZIM archives.
@@ -94,6 +94,7 @@ The launchers inherit `WAN_*` environment variables. `.env.example` is a referen
 | `WAN_COMFY_ROOT` | `D:\AI\ComfyUI` | ComfyUI installation |
 | `WAN_GEMMA4_ROOT` | `D:\LocalAI\Gemma4E4B` | Gemma model and llama.cpp runtime |
 | `WAN_LLAMA_RUNTIME_ROOT` | same as `WAN_GEMMA4_ROOT` | Optional separate llama.cpp runtime |
+| `WAN_CUDA_LLAMA_RUNTIME_ROOT` | `D:\LocalAI\Bonsai27B` | Optional CUDA-enabled llama.cpp runtime used only for bounded Gemma buffer bursts |
 | `WAN_SUPERTONIC_ROOT` | `D:\LocalAI\Supertonic3` | Offline neural speech service |
 | `WAN_KIWIX_ROOT` | `D:\LocalAI\OfflineWikipedia` | Optional educational sources |
 | `WAN_BONSAI_ROOT` | `D:\LocalAI\Bonsai27B` | Optional movie planner |
@@ -136,7 +137,9 @@ Choose the language of the story under **Narration language**, then choose a dif
 
 The Cinema preview default is 80–110 total spoken words per clip. The Advanced minimum and maximum values use the same total-spoken-word definition. When translation is enabled, the planner reduces source prose before generation, then learns the measured source-to-translation expansion ratio. Completed-scene cadence and actual narration duration select the required part of the budget. The sentence count is validated, gross duration-envelope misses use the existing bounded repair path, and normal language-dependent word variation is preserved. This keeps bilingual scenes close to the generation cadence instead of doubling them or disguising a short scene with arbitrarily slow speech.
 
-Gemma uses two bounded CPU request slots: one can plan the next source scene while the other produces the current scene's validated sentence translations. Each slot retains a 16K context ceiling. The separate translation gate still fails closed on missing, reordered, combined, or split sentences; concurrency does not weaken archive or TTS alignment.
+At startup, the Theater capability-checks `WAN_CUDA_LLAMA_RUNTIME_ROOT` for both `llama-server.exe` and `ggml-cuda.dll`. When available, it waits for earlier ComfyUI work to finish, explicitly unloads ComfyUI models, and runs the same required Gemma model in a bounded two-slot CUDA burst on a separate local port. The burst creates at least three fully validated, sentence-aligned scenes and then synchronously terminates the CUDA process before Wan is allowed to start. It never substitutes a different language model. If CUDA startup or structured generation fails, the failure is archived in session metrics and startup continues with the same Gemma model on CPU.
+
+After the opening buffer is ready, Gemma uses two bounded CPU request slots: one can plan the next source scene while the other produces the current scene's validated sentence translations. This avoids repeated GPU model swaps in steady state and preserves the measured continuous Wan feed. Each CPU or GPU slot retains a 16K context ceiling. The separate translation gate still fails closed on missing, reordered, combined, or split sentences; concurrency does not weaken archive or TTS alignment. Resumed sessions reuse every already-prepared scene and only burst when fewer than three unrendered prepared scenes remain.
 
 Sentence pairs, language codes, translated titles, the complete configuration, word counts, model timing/context, and GPU-feed wait are stored in the ordinary session and archive JSON. Version 1 sessions without bilingual fields remain playable and resumable.
 
