@@ -18,6 +18,8 @@ This repository contains the application code only. Model weights, Wikipedia arc
 
 The reference system is Windows 11 with a Ryzen 9 7950X, 64 GB RAM, and an NVIDIA RTX 5070 12 GB.
 
+For the measured end-to-end baseline, current bottleneck analysis, telemetry limitations, and a reproducible tuning procedure, see [`PERFORMANCE.md`](PERFORMANCE.md). The figures below describe this reference machine and are not universal performance guarantees.
+
 - Gemma 4 E4B Q4_K_M: 15.31 output tokens/second and 146.73 prompt tokens/second at 8 CPU threads; about 4.62 GiB resident RAM.
 - Live Theater planning: 13.29 output tokens/second with the video and speech services available.
 - Supertonic 3: approximately 0.20 real-time factor in the measured narration test.
