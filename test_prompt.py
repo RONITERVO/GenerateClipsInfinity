@@ -1,11 +1,14 @@
 import asyncio
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 
 from app import build_prompt, validate_movie_payload, validate_payload, validate_theater_payload
 from movie_pipeline import MovieManager
-from theater_pipeline import StoryRuntime, TheaterError, TheaterManager
+from theater_pipeline import (
+    StoryRuntime, SupertonicRuntime, TheaterError, TheaterManager, split_narration_sentences,
+)
 
 
 class PromptTests(unittest.TestCase):
@@ -61,7 +64,109 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(config["audience"], "family")
         self.assertEqual(config["voice"], "M1")
         self.assertEqual(config["language"], "en")
+        self.assertEqual(config["translation_language"], "")
         self.assertGreaterEqual(config["seed"], 0)
+
+    def test_theater_accepts_distinct_offline_translation_language(self):
+        config = validate_theater_payload({
+            "prompt": "A forest mystery", "language": "fi", "translation_language": "en",
+        })
+        self.assertEqual(config["language"], "fi")
+        self.assertEqual(config["translation_language"], "en")
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            validate_theater_payload({"prompt": "A story", "language": "fi", "translation_language": "fi"})
+        with self.assertRaisesRegex(ValueError, "supported translation"):
+            validate_theater_payload({"prompt": "A story", "translation_language": "na"})
+
+    def test_bilingual_word_budget_reduces_source_prose(self):
+        config = validate_theater_payload({"prompt": "A story", "translation_language": "fi"})
+        minimum, maximum = TheaterManager.narration_word_limits(config)
+        self.assertEqual((minimum, maximum), (105, 285))
+        self.assertLess(minimum, config["quality_settings"]["min_words"])
+        self.assertLess(maximum, config["quality_settings"]["max_words"])
+
+    def test_offline_sentence_splitter_keeps_closing_quotes_and_cjk_boundaries(self):
+        text = 'She said, "Run now!" Then they crossed the bridge. \u732b\u306f\u8d70\u3063\u305f\u3002\u6708\u304c\u51fa\u305f\uff01'
+        self.assertEqual(split_narration_sentences(text), [
+            'She said, "Run now!"', "Then they crossed the bridge.", "\u732b\u306f\u8d70\u3063\u305f\u3002", "\u6708\u304c\u51fa\u305f\uff01",
+        ])
+
+    def test_translation_stage_preserves_one_to_one_sentence_alignment(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            (root / "session" / "logs").mkdir(parents=True)
+            manager._save = lambda _state: None
+
+            class Writer:
+                async def complete(self, _messages, max_tokens=900):
+                    return (
+                        '{"title_translation":"The Gate","sentences":['
+                        '{"id":1,"translation":"The fox found a key."},'
+                        '{"id":2,"translation":"The gate began to glow."}]}',
+                        {"tokens_per_second": 12.5},
+                    )
+
+            manager.writer = Writer()
+            state = {
+                "id": "session", "config": {"language": "fi", "translation_language": "en"},
+                "metrics": {},
+            }
+            scene = {
+                "number": 2, "title": "Portti", "narration": "Kettu l\u00f6ysi avaimen. Portti alkoi hehkua.",
+            }
+            return await manager._prepare_narration(state, scene)
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(result["translated_title"], "The Gate")
+        self.assertEqual(len(result["narration_sentences"]), 2)
+        self.assertEqual(result["narration_sentences"][1]["translation"], "The gate began to glow.")
+
+    def test_wav_concatenation_preserves_all_sentence_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parts = [root / "one.wav", root / "two.wav"]
+            frame_counts = [80, 120]
+            for path, count in zip(parts, frame_counts):
+                with wave.open(str(path), "wb") as output:
+                    output.setnchannels(1)
+                    output.setsampwidth(2)
+                    output.setframerate(8000)
+                    output.writeframes(b"\x00\x00" * count)
+            combined = root / "combined.wav"
+            SupertonicRuntime._concatenate_wavs(parts, combined)
+            with wave.open(str(combined), "rb") as result:
+                self.assertEqual(result.getnframes(), sum(frame_counts))
+                self.assertEqual(result.getframerate(), 8000)
+
+    def test_bilingual_tts_alternates_original_then_translation(self):
+        async def exercise(root: Path):
+            runtime = SupertonicRuntime.__new__(SupertonicRuntime)
+            calls = []
+
+            async def synthesize(text, output, *, voice, language):
+                calls.append((text, language, voice))
+                with wave.open(str(output), "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(8000)
+                    audio.writeframes(b"\x00\x00" * 8)
+                return 0.01
+
+            runtime.synthesize = synthesize
+            await runtime.synthesize_alternating([
+                {"original": "Hyv\u00e4\u00e4 huomenta.", "translation": "Good morning."},
+                {"original": "Menn\u00e4\u00e4n!", "translation": "Let's go!"},
+            ], root / "result.wav", voice="F2", original_language="fi", translation_language="en")
+            return calls
+
+        with tempfile.TemporaryDirectory() as directory:
+            calls = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(calls, [
+            ("Hyv\u00e4\u00e4 huomenta.", "fi", "F2"), ("Good morning.", "en", "F2"),
+            ("Menn\u00e4\u00e4n!", "fi", "F2"), ("Let's go!", "en", "F2"),
+        ])
 
     def test_theater_accepts_all_advanced_generation_values(self):
         requested = {

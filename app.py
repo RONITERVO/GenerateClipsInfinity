@@ -631,10 +631,15 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Choose a supported audience level.")
     voice = str(raw.get("voice", "M1")).upper()
     language = str(raw.get("language", "en")).lower()
+    translation_language = str(raw.get("translation_language") or "").lower()
     if voice not in SupertonicRuntime.VOICES:
         raise ValueError("Choose a supported Supertonic voice.")
     if language not in SupertonicRuntime.LANGUAGES:
         raise ValueError("Choose a supported narration language.")
+    if translation_language and translation_language not in SupertonicRuntime.TRANSLATION_LANGUAGES:
+        raise ValueError("Choose a supported translation language or turn translation off.")
+    if translation_language == language:
+        raise ValueError("The translation language must differ from the story language.")
     seed = int(raw.get("seed", -1))
     if seed < 0:
         seed = secrets.randbelow(2**31 - 1)
@@ -674,7 +679,7 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         "prompt": prompt, "learning_focus": str(raw.get("learning_focus", "")).strip()[:800],
         "quality": "custom", "quality_settings": quality_settings,
         "mode": mode, "audience": audience, "seed": seed,
-        "voice": voice, "language": language,
+        "voice": voice, "language": language, "translation_language": translation_language,
     }
 
 
