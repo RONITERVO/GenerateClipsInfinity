@@ -178,6 +178,22 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(config["context_compaction_scenes"], 30)
         self.assertGreaterEqual(config["seed"], 0)
 
+    def test_dream_mode_accepts_a_minimal_seed_without_grounding_or_learning_focus(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        config = validate_theater_payload({
+            "prompt": "Velvet", "mode": "dream", "learning_focus": "History of textiles",
+            "translation_language": "fi",
+        })
+        prompt = manager._system_prompt(config)
+        self.assertEqual(config["prompt"], "Velvet")
+        self.assertEqual(config["learning_focus"], "")
+        self.assertEqual(config["translation_language"], "fi")
+        self.assertFalse(manager.uses_grounding(config))
+        self.assertIn("faint associative spark", prompt)
+        self.assertIn("Invent every person, place, object, history, rule and relationship", prompt)
+        self.assertNotIn("seed as a binding premise contract", prompt)
+        self.assertNotIn("offline encyclopedia excerpts", prompt)
+
     def test_context_compaction_interval_is_advanced_and_bounded(self):
         config = validate_theater_payload({"prompt": "A story", "context_compaction_scenes": 45})
         self.assertEqual(config["context_compaction_scenes"], 45)
@@ -574,6 +590,71 @@ class PromptTests(unittest.TestCase):
         })
         self.assertIn("primary host clearly recognizable and present", prompt)
         self.assertIn("natural near-camera eyeline", prompt)
+
+    def test_dream_bootstrap_replaces_literal_seed_requirements_and_removes_facts(self):
+        async def exercise(root: Path):
+            requests = []
+
+            class Writer:
+                async def complete(self, messages, max_tokens=1300):
+                    requests.append(messages[-1]["content"])
+                    return json.dumps({
+                        "title": "The Soft Staircase",
+                        "bible": {
+                            "protagonists": [{"name": "Iri", "role": "wanderer", "appearance": "silver coat"}],
+                            "world": "a staircase floating through warm rain",
+                            "visual_style": "soft nocturnal cinema",
+                            "premise_contract": ["Velvet must remain literal"],
+                            "continuity_rules": ["Doors remember the last color they touched"],
+                        },
+                        "story_summary": "Iri follows a staircase through rain.",
+                        "scene": {
+                            "number": 1, "title": "Warm Steps", "beat": "The stairs unfold",
+                            "narration": "Warm rain gathers while a silver staircase unfolds beneath Iri.",
+                            "visual_action": "Iri steps onto a stair that opens like a flower.",
+                            "camera": "slow tracking shot", "learning_point": "Velvet is a woven textile.",
+                            "sources": [{"title": "Textiles", "url": "offline://textiles"}],
+                        },
+                    }), {"tokens_per_second": 12.0, "elapsed_seconds": 1.0, "prompt_tokens": 100}
+
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            manager.writer = Writer()
+            state = {
+                "id": "dream", "metrics": {},
+                "config": validate_theater_payload({"prompt": "Velvet", "mode": "dream"}),
+            }
+            result = await manager._bootstrap(state)
+            return requests[0], result
+
+        with tempfile.TemporaryDirectory() as directory:
+            request, result = asyncio.run(exercise(Path(directory)))
+        self.assertIn("loosely associated with this pre-sleep cue: Velvet", request)
+        self.assertIn("no non-negotiable literal requirements", request)
+        self.assertNotIn("OFFLINE ENCYCLOPEDIA EXCERPTS", request)
+        self.assertEqual(result["bible"]["experience"], "dream")
+        self.assertEqual(result["bible"]["seed_role"], "weak_association")
+        self.assertNotIn("Velvet must remain literal", result["bible"]["premise_contract"])
+        self.assertEqual(result["scene"]["learning_point"], "")
+        self.assertNotIn("sources", result["scene"])
+
+    def test_dream_visual_prompt_allows_intentional_metamorphosis(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        state = {
+            "config": {"mode": "dream"},
+            "bible": {
+                "visual_style": "soft nocturnal cinema", "world": "a floating staircase",
+                "protagonists": [{"name": "Iri", "role": "wanderer", "appearance": "silver coat"}],
+                "premise_contract": ["Everything is invented"],
+                "continuity_rules": ["Doors remember colors"],
+            },
+        }
+        prompt = manager._visual_prompt(state, {
+            "camera": "slow tracking shot", "visual_action": "A stair opens into a pale moth.",
+        })
+        self.assertIn("invented dream-space", prompt)
+        self.assertIn("surreal metamorphosis", prompt)
+        self.assertNotIn("Same faces, ages, bodies", prompt)
 
     def test_gemma4_e4b_is_primary_and_uses_measured_settings(self):
         with tempfile.TemporaryDirectory() as directory:

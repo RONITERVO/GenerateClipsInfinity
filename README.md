@@ -9,6 +9,7 @@ This repository contains the application code only. Model weights, Wikipedia arc
 - Single Wan 2.2 text-to-video clips with the tested two-stage LightX2V workflow.
 - One-sentence movie planning, progressive generation, editable per-clip timing, subtitles, EDL, CSV shot list, and final MP4 export.
 - Endless offline theater with a bounded Gemma GPU opening burst, Gemma/Supertonic sustaining work on CPU, and Wan rendering on the GPU.
+- Endless Dream mode: a one-word pre-sleep cue becomes an entirely invented, ungrounded stream of evolving imagery.
 - Interactive character show mode: a stable resident host continues an activity, receives delayed viewer chat or decisions, and answers in later synchronized scenes.
 - Live world direction during Endless Theater: inject a one-scene event or a persistent future rule without replacing completed media.
 - Optional bilingual language-learning playback: every story sentence is displayed and spoken first in the selected story language and then in the learner's translation language.
@@ -131,7 +132,15 @@ Gemma planning, Supertonic speech, Wan rendering, and FFmpeg assembly overlap. P
 
 The live duration controller measures the interval between fully archived scenes, learns the actual seconds per spoken word and bilingual expansion ratio for the selected languages and voice, and targets 1.08× playback coverage inside the configured word budget. Gemma's sentence plan and a broad safe duration envelope are validated without retrying ordinary language-dependent word variation. Supertonic remains within a natural 0.96–1.05 speed range and changes pace only for the residual duration error; pacing is not randomized. The synchronization graph performs interpolation, forward/reverse coverage, encoding, and audio muxing in one FFmpeg pass, avoiding repeated lossy H.264 encodes.
 
-The writer stores a structured cast, world, visual style, binding premise contract, and continuity rules. Explicit character counts, objects, actions, threats, and settings in the user's prompt are treated as non-negotiable.
+The ordinary story experiences store a structured cast, world, visual style, binding premise contract, and continuity rules. Explicit character counts, objects, actions, threats, and settings in those prompts are treated as non-negotiable. Dream mode intentionally uses a different seed contract described below.
+
+### Endless Dream
+
+Choose **Endless dream** and enter a faint cue such as `velvet`, `warm rain`, or `blue door`. The cue is deliberately not treated as a request specification or factual topic. Gemma uses it once as a loose association, invents the people, places, objects, histories and internal rules, and begins inside an unfolding image rather than defining the word or announcing a dream.
+
+Dream mode never starts Kiwix, ignores any submitted learning focus, omits encyclopedia text from both bootstrap and scene-planning prompts, bypasses factual review, and deterministically removes learning points and sources from generated scenes. If a cue names a real person, place or object, the writing contract asks Gemma to transform it into an original fictional image instead of making claims about the real subject. This is prompt-level isolation, not a claim that a pretrained language model can forget its training data; avoiding recognizable real-world facts is strongly requested and factual UI fields are stripped, but model priors cannot be mathematically erased.
+
+Continuity is associative rather than random. Recurring sensory motifs and enough local identity connect adjacent scenes, while meaningful impossible transformations are allowed. Wan still receives one coherent, filmable action per clip so the dream remains watchable instead of becoming an incoherent prompt collage. Translation, synchronized speech, archives, live delayed whispers, duration control and the existing Gemma/Wan resource schedule work exactly as in Pure Story; Dream adds no model or inference stage.
 
 ### Live world direction
 

@@ -642,15 +642,15 @@ async def api_movie_render_edit(request: web.Request) -> web.Response:
 
 
 def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    mode = str(raw.get("mode", "edutainment"))
     prompt = str(raw.get("prompt", "")).strip()
     if not prompt:
-        raise ValueError("Write a story or learning idea first.")
+        raise ValueError("Whisper a dream seed or write a story or learning idea first.")
     if len(prompt) > 1200:
         raise ValueError("The theater prompt is too long (maximum 1,200 characters).")
-    mode = str(raw.get("mode", "edutainment"))
     audience = str(raw.get("audience", "family"))
-    if mode not in {"interactive", "story", "edutainment", "lesson"}:
-        raise ValueError("Choose interactive character, story, edutainment, or lesson mode.")
+    if mode not in {"dream", "interactive", "story", "edutainment", "lesson"}:
+        raise ValueError("Choose dream, interactive character, story, edutainment, or lesson mode.")
     if audience not in {"young", "family", "teen", "adult"}:
         raise ValueError("Choose a supported audience level.")
     voice = str(raw.get("voice", "M1")).upper()
@@ -705,7 +705,8 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         "min_words": min_words, "max_words": max_words, "max_slow": max_slow,
     }
     return {
-        "prompt": prompt, "learning_focus": str(raw.get("learning_focus", "")).strip()[:800],
+        "prompt": prompt,
+        "learning_focus": "" if mode == "dream" else str(raw.get("learning_focus", "")).strip()[:800],
         "quality": "custom", "quality_settings": quality_settings,
         "mode": mode, "audience": audience, "seed": seed,
         "voice": voice, "language": language, "translation_language": translation_language,
