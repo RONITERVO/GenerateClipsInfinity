@@ -147,6 +147,8 @@ Advanced settings include a **Context compaction interval** measured in planned 
 
 Sentence pairs, language codes, translated titles, the complete configuration, word counts, model timing/context, and GPU-feed wait are stored in the ordinary session and archive JSON. Version 1 sessions without bilingual fields remain playable and resumable.
 
+Every UI page includes **Exit and release**. The localhost-only action interrupts queued ComfyUI work, marks active Theater and movie work resumable, stops app-owned Gemma, Supertonic, Kiwix, movie-planner and ComfyUI process trees, unloads ComfyUI models, and then closes the local web server. Manually started services are never killed by name. Closing an ordinary browser tab does not stop generation. If FFmpeg alone receives an external Windows termination signal, Theater retries that synchronization command once; structured encoding errors still fail immediately and remain visible.
+
 ## Development
 
 Run the same checks used by GitHub Actions:

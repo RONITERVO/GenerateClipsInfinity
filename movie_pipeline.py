@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from aiohttp import ClientSession, ClientTimeout
 
+from process_utils import terminate_process_tree
+
 
 LOGGER = logging.getLogger("wan-video-ui.movie")
 PROJECT_VERSION = 2
@@ -88,12 +90,7 @@ class LocalPlanner:
 
     async def stop(self) -> None:
         if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(asyncio.to_thread(self.process.wait), timeout=12)
-            except asyncio.TimeoutError:
-                self.process.kill()
-                await asyncio.to_thread(self.process.wait)
+            await terminate_process_tree(self.process, timeout=12)
         elif self.pid_file.exists():
             try:
                 os.kill(int(self.pid_file.read_text(encoding="utf-8").strip()), signal.SIGTERM)
@@ -391,6 +388,25 @@ class MovieManager:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    async def shutdown(self) -> None:
+        """Stop owned work while keeping every completed project artifact resumable."""
+        active: list[tuple[str, asyncio.Task[None]]] = [
+            (job_id, task) for job_id, task in self.tasks.items() if not task.done()
+        ]
+        for _, task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*(task for _, task in active), return_exceptions=True)
+        for job_id, _ in active:
+            state = self.jobs.get(job_id)
+            if state:
+                self._update(
+                    state,
+                    status="interrupted",
+                    message="The app exited; completed movie assets and edit decisions were kept.",
+                )
+        await self.planner.stop()
 
     async def _run(self, state: dict[str, Any]) -> None:
         async with self.controller.workflow_lock:
