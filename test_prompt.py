@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import time
 import unittest
@@ -84,7 +85,20 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(config["translation_language"], "")
         self.assertEqual(config["quality_settings"]["min_words"], 80)
         self.assertEqual(config["quality_settings"]["max_words"], 110)
+        self.assertEqual(config["context_compaction_scenes"], 30)
         self.assertGreaterEqual(config["seed"], 0)
+
+    def test_context_compaction_interval_is_advanced_and_bounded(self):
+        config = validate_theater_payload({"prompt": "A story", "context_compaction_scenes": 45})
+        self.assertEqual(config["context_compaction_scenes"], 45)
+        self.assertEqual(
+            validate_theater_payload({"prompt": "A story", "context_compaction_scenes": 0})[
+                "context_compaction_scenes"
+            ],
+            0,
+        )
+        with self.assertRaisesRegex(ValueError, "0 .* 5 and 200"):
+            validate_theater_payload({"prompt": "A story", "context_compaction_scenes": 2})
 
     def test_theater_accepts_distinct_offline_translation_language(self):
         config = validate_theater_payload({
@@ -220,6 +234,27 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(entry["planner_metrics"]["prompt_tokens"], 900)
         self.assertEqual(entry["translation_metrics"]["elapsed_seconds"], 4.0)
         self.assertEqual(entry["gpu_feed_wait_seconds"], 0.25)
+
+    def test_durable_archive_keeps_compacted_continuity_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root / "wan_theater"
+            (manager.root / "session").mkdir(parents=True)
+            state = {
+                "id": "session", "title": "Story", "status": "running",
+                "config": {"prompt": "A durable story", "context_compaction_scenes": 30},
+                "bible": {"world": "harbor"}, "grounding": None, "segments": [],
+                "story_summary": "Mira guards the gate.",
+                "continuity_memory": {"active_threads": ["Find the key"]},
+                "context_compacted_through_scene": 30,
+                "metrics": {"context_compaction_events": [{"through_scene": 30}]},
+            }
+            manager._write_playlist(state)
+            archive = json.loads((manager.root / "session" / "archive.json").read_text(encoding="utf-8"))
+        self.assertEqual(archive["context_compacted_through_scene"], 30)
+        self.assertEqual(archive["continuity_memory"]["active_threads"], ["Find the key"])
+        self.assertEqual(archive["context_compaction_events"][0]["through_scene"], 30)
 
     def test_coverage_uses_completed_segment_cadence(self):
         async def exercise(root: Path):
@@ -578,6 +613,55 @@ class PromptTests(unittest.TestCase):
             with self.assertRaisesRegex(GpuReleaseError, "still running"):
                 asyncio.run(exercise(Path(directory)))
 
+    def test_every_adaptive_gpu_refill_compacts_before_planning(self):
+        async def exercise(root: Path):
+            events = []
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            manager.GPU_BURST_TARGET = 3
+            manager._save = lambda _state: None
+
+            class Controller:
+                workflow_lock = asyncio.Lock()
+                async def wait_until_idle(self): events.append("idle")
+                async def free_models(self): events.append("free")
+
+            class Writer:
+                model_label = "Gemma"
+                profile = "cpu"
+                async def start(self, _logs, profile="cpu"):
+                    self.profile = profile
+                    events.append(f"start:{profile}")
+                async def stop(self, profile=None): events.append(f"stop:{profile}")
+                async def healthy(self, profile=None): return False
+                def activate(self, profile):
+                    self.profile = profile
+                    events.append(f"activate:{profile}")
+
+            async def compact(_state, reason):
+                events.append(f"compact:{reason}")
+                return True
+
+            async def fill(_state, target, _excluded=None):
+                events.append(f"fill:{target}")
+                return target
+
+            manager.controller = Controller()
+            manager.writer = Writer()
+            manager._compact_story_context = compact
+            manager._fill_story_buffer = fill
+            state = {
+                "id": "session", "config": {"language": "en", "translation_language": ""},
+                "bible": {"world": "test"}, "planned": [{"number": 30}],
+                "segments": [], "metrics": {},
+            }
+            await manager._prime_gpu_story_buffer(state, reason="adaptive_refill")
+            return events
+
+        with tempfile.TemporaryDirectory() as directory:
+            events = asyncio.run(exercise(Path(directory)))
+        self.assertLess(events.index("compact:adaptive_refill"), events.index("fill:3"))
+
     def test_adaptive_gpu_refill_requires_an_empty_queue_and_measured_advantage(self):
         manager = TheaterManager.__new__(TheaterManager)
 
@@ -602,6 +686,14 @@ class PromptTests(unittest.TestCase):
         ready_queue.get_nowait()
         state["metrics"]["translation_request_started_at"] = time.time() - 35.0
         self.assertFalse(manager._should_refill_on_gpu(state, ready_queue, source_queue))
+        state["metrics"].pop("translation_request_started_at")
+        state["metrics"].update({
+            "planner_cycle_ema": 25.0,
+            "context_compaction_elapsed_ema": 30.0,
+            "context_compaction_started_at": time.time() - 5.0,
+        })
+        self.assertTrue(manager._should_refill_on_gpu(state, ready_queue, source_queue))
+        self.assertGreater(state["metrics"]["gpu_refill_predicted_cpu_wait"], 80)
 
     def test_gpu_refill_cycles_do_not_contaminate_cpu_wait_model(self):
         async def exercise():
@@ -629,6 +721,84 @@ class PromptTests(unittest.TestCase):
         metrics = asyncio.run(exercise())
         self.assertEqual(metrics["planner_cycle_ema"], 50.0)
         self.assertIn("gpu_planner_cycle_seconds", metrics)
+
+    def test_context_compaction_preserves_structured_continuity(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            manager._save = lambda _state: None
+            requests = []
+
+            class Writer:
+                profile = "gpu"
+                async def complete(self, messages, max_tokens=900):
+                    requests.append(messages[-1]["content"])
+                    return (
+                        '{"story_summary":"Mira guards the opened gate while Sol searches for the missing key.",'
+                        '"continuity_memory":{"character_states":['
+                        '{"name":"Mira","state":"alert","location":"gate","possessions":["map"]}],'
+                        '"active_threads":["Find the missing key"],'
+                        '"continuity_facts":["The northern gate is permanently open"]}}',
+                        {"elapsed_seconds": 1.5, "prompt_tokens": 700, "completion_tokens": 120},
+                    )
+
+            manager.writer = Writer()
+            (root / "session" / "logs").mkdir(parents=True)
+            state = {
+                "id": "session",
+                "config": {"language": "en", "mode": "story", "audience": "family"},
+                "bible": {"premise_contract": ["Mira must guard the gate"]},
+                "story_summary": "Long prior summary. " * 100,
+                "planned": [
+                    {"number": number, "title": f"Scene {number}", "beat": "Advance", "narration": "Action.",
+                     "visual_action": "Mira moves."}
+                    for number in range(1, 31)
+                ],
+                "metrics": {},
+            }
+            compacted = await manager._compact_story_context(state, reason="adaptive_refill")
+            return compacted, state, requests
+
+        with tempfile.TemporaryDirectory() as directory:
+            compacted, state, requests = asyncio.run(exercise(Path(directory)))
+        self.assertTrue(compacted)
+        self.assertEqual(state["metrics"]["last_context_compaction_scene"], 30)
+        self.assertEqual(state["metrics"]["context_compaction_profile"], "gpu")
+        self.assertEqual(state["continuity_memory"]["character_states"][0]["name"], "Mira")
+        self.assertIn("Find the missing key", state["continuity_memory"]["active_threads"])
+        self.assertIn("FIXED BIBLE", requests[0])
+        self.assertLess(
+            state["metrics"]["context_compaction_after_chars"],
+            state["metrics"]["context_compaction_before_chars"],
+        )
+
+    def test_context_compaction_interval_uses_last_attempt_not_context_limit(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        state = {
+            "config": {"context_compaction_scenes": 30}, "bible": {"world": "test"},
+            "planned": [{"number": number} for number in range(1, 31)], "metrics": {},
+        }
+        self.assertTrue(manager._context_compaction_due(state))
+        state["metrics"]["last_context_compaction_attempt_scene"] = 30
+        self.assertFalse(manager._context_compaction_due(state))
+        state["planned"].extend({"number": number} for number in range(31, 60))
+        self.assertFalse(manager._context_compaction_due(state))
+        state["planned"].append({"number": 60})
+        self.assertTrue(manager._context_compaction_due(state))
+        state["config"]["context_compaction_scenes"] = 0
+        self.assertFalse(manager._context_compaction_due(state))
+
+    def test_compaction_replaces_old_recent_scenes_with_three_causal_anchors(self):
+        recent = [{"number": number} for number in range(1, 14)]
+        compacted = {"context_compacted_through_scene": 10}
+        self.assertEqual(
+            [item["number"] for item in TheaterManager._recent_scene_context(compacted, recent)],
+            [8, 9, 10, 11, 12, 13],
+        )
+        self.assertEqual(
+            [item["number"] for item in TheaterManager._recent_scene_context({}, recent)],
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        )
 
     def test_restored_workers_exclude_rendered_but_unarchived_scene(self):
         async def exercise():
@@ -737,7 +907,8 @@ class PromptTests(unittest.TestCase):
             state = {
                 "id": "session",
                 "config": validate_theater_payload({"prompt": "A path", "translation_language": "fi"}),
-                "bible": {}, "story_summary": "They are ready.", "planned": [],
+                "bible": {}, "story_summary": "They are ready.",
+                "continuity_memory": {"active_threads": ["Find the gate"]}, "planned": [],
                 "metrics": {"production_ema": 40.0},
             }
             scene = await manager._plan_next(state, 2, [])
@@ -749,6 +920,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("hard playback-duration budget", request)
         self.assertIn("exactly 6 complete sentences", request)
         self.assertIn("sentence contain 7-7 words", request)
+        self.assertIn("Find the gate", request)
         self.assertEqual(metrics["planner_prompt_tokens"], 420)
         self.assertEqual(scene["planner_metrics"]["elapsed_seconds"], 1.2)
 

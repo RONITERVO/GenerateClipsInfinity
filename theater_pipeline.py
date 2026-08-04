@@ -556,6 +556,7 @@ class TheaterManager:
     GPU_BURST_TARGET = 3
     GPU_REFILL_POLL_SECONDS = 5.0
     GPU_REFILL_MIN_PREDICTED_WAIT = 12.0
+    DEFAULT_CONTEXT_COMPACTION_SCENES = 30
     COVERAGE_TARGET = 1.08
     DEFAULT_TTS_SPEED = 1.05
     MIN_TTS_SPEED = 0.96
@@ -662,7 +663,12 @@ class TheaterManager:
             "format": "Wan Endless Theater", "version": THEATER_VERSION,
             "id": state["id"], "title": state.get("title"), "prompt": state["config"]["prompt"],
             "config": state["config"],
-            "bible": state.get("bible"), "grounding": state.get("grounding"), "segments": segments,
+            "bible": state.get("bible"), "grounding": state.get("grounding"),
+            "story_summary": state.get("story_summary"),
+            "continuity_memory": state.get("continuity_memory", {}),
+            "context_compacted_through_scene": state.get("context_compacted_through_scene", 0),
+            "context_compaction_events": state.get("metrics", {}).get("context_compaction_events", []),
+            "segments": segments,
             "total_duration": state.get("total_duration", 0), "updated": state.get("updated"),
         }
         _atomic_json(directory / "archive.json", archive)
@@ -718,6 +724,9 @@ class TheaterManager:
                 "writer_mode": "starting",
                 "gpu_burst_available": self.writer.gpu_available,
                 "gpu_burst_target": self.GPU_BURST_TARGET,
+                "context_compaction_interval": int(
+                    config.get("context_compaction_scenes", self.DEFAULT_CONTEXT_COMPACTION_SCENES)
+                ),
             },
         }
         directory = self._dir(session_id)
@@ -1106,6 +1115,201 @@ class TheaterManager:
         requested = previous_speed * predicted_duration / max(0.1, target_duration)
         return round(max(self.MIN_TTS_SPEED, min(self.MAX_TTS_SPEED, requested)), 3)
 
+    def _context_compaction_due(self, state: dict[str, Any]) -> bool:
+        if not state.get("bible"):
+            return False
+        interval = int(
+            state.get("config", {}).get("context_compaction_scenes", self.DEFAULT_CONTEXT_COMPACTION_SCENES)
+        )
+        if interval <= 0:
+            return False
+        through_scene = max((int(item["number"]) for item in state.get("planned", [])), default=0)
+        last_attempt = int(state.get("metrics", {}).get("last_context_compaction_attempt_scene") or 0)
+        return through_scene > 0 and through_scene - last_attempt >= interval
+
+    @staticmethod
+    def _validated_continuity_memory(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise TheaterError("context compaction did not return structured continuity memory")
+        characters = value.get("character_states", [])
+        threads = value.get("active_threads", [])
+        facts = value.get("continuity_facts", [])
+        if not isinstance(characters, list) or not isinstance(threads, list) or not isinstance(facts, list):
+            raise TheaterError("context compaction returned malformed continuity lists")
+        clean_characters: list[dict[str, Any]] = []
+        for item in characters[:16]:
+            if not isinstance(item, dict) or not str(item.get("name", "")).strip():
+                raise TheaterError("context compaction returned a character state without a name")
+            possessions = item.get("possessions", [])
+            if not isinstance(possessions, list):
+                raise TheaterError("context compaction returned malformed character possessions")
+            clean_characters.append({
+                "name": str(item["name"]).strip()[:120],
+                "state": str(item.get("state", "")).strip()[:500],
+                "location": str(item.get("location", "")).strip()[:240],
+                "possessions": [str(entry).strip()[:160] for entry in possessions[:12] if str(entry).strip()],
+            })
+
+        def clean_strings(items: list[Any], limit: int) -> list[str]:
+            return [str(item).strip()[:400] for item in items[:limit] if str(item).strip()]
+
+        return {
+            "character_states": clean_characters,
+            "active_threads": clean_strings(threads, 16),
+            "continuity_facts": clean_strings(facts, 28),
+        }
+
+    async def _compact_story_context(
+        self, state: dict[str, Any], *, reason: str,
+    ) -> bool:
+        """Replace cumulative prose with bounded causal and entity continuity state."""
+        through_scene = max((int(item["number"]) for item in state.get("planned", [])), default=0)
+        if not through_scene or not state.get("bible"):
+            return False
+        metrics = state.setdefault("metrics", {})
+        metrics["last_context_compaction_attempt_scene"] = through_scene
+        summary = str(state.get("story_summary") or "").strip()
+        if len(summary) > 24000:
+            summary = summary[:8000] + "\n[older middle compressed by input bound]\n" + summary[-16000:]
+        recent = [
+            {
+                "number": item.get("number"), "title": item.get("title"), "beat": item.get("beat"),
+                "narration": item.get("narration"), "visual_action": item.get("visual_action"),
+            }
+            for item in state.get("planned", [])[-12:]
+        ]
+        planner_descriptors = [
+            {
+                "number": item.get("number"), "title": item.get("title"), "beat": item.get("beat"),
+                "visual_action": item.get("visual_action"),
+            }
+            for item in state.get("planned", [])
+        ]
+        request = (
+            "Compact the evolving story context for future scene planning. This is continuity bookkeeping, not a new "
+            "story scene. Preserve every unresolved goal, promise, threat and causal dependency; each recurring "
+            "character's current condition, location, relationships and possessions; irreversible world changes; and "
+            "all facts needed to obey the premise contract. Never invent an event, resolve an open thread, retell scene "
+            "prose, or weaken the fixed bible. Write story_summary as at most 250 words describing the current situation. "
+            "Return {story_summary,continuity_memory:{character_states:[{name,state,location,possessions:[...]}],"
+            "active_threads:[...],continuity_facts:[...]}} only. Keep every list item concise.\n\n"
+            f"FIXED BIBLE:\n{json.dumps(state['bible'], ensure_ascii=False)}\n\n"
+            f"PREVIOUS CONTINUITY MEMORY:\n{json.dumps(state.get('continuity_memory', {}), ensure_ascii=False)}\n\n"
+            f"CURRENT ROLLING SUMMARY:\n{summary}\n\n"
+            f"RECENT CAUSAL SCENES:\n{json.dumps(recent, ensure_ascii=False)}"
+        )
+        before_chars = (
+            len(summary)
+            + len(json.dumps(state.get("continuity_memory", {}), ensure_ascii=False))
+            + len(json.dumps(planner_descriptors[-10:], ensure_ascii=False))
+        )
+        writer_profile = getattr(self.writer, "profile", "cpu")
+        compaction_started = time.perf_counter()
+        metrics["context_compaction_started_at"] = time.time()
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            state["message"] = (
+                f"Compacting continuity through scene {through_scene} on {writer_profile.upper()} "
+                f"(attempt {attempt}/3)..."
+            )
+            metrics.update({"planner_stage": "context_compaction", "context_compaction_reason": reason})
+            self._save(state)
+            try:
+                attempt_request = request
+                if last_error:
+                    attempt_request += (
+                        f"\n\nThe previous compaction was rejected: {last_error}. "
+                        "Make the summary and continuity lists materially shorter without dropping required state."
+                    )
+                content, completion_metrics = await self.writer.complete([
+                    {"role": "system", "content": self._system_prompt(state["config"])},
+                    {"role": "user", "content": attempt_request},
+                ], max_tokens=1100)
+                with (self._dir(state["id"]) / "logs" / "context_compaction_raw.jsonl").open(
+                    "a", encoding="utf-8",
+                ) as log:
+                    log.write(json.dumps({
+                        "time": time.time(), "through_scene": through_scene, "reason": reason,
+                        "attempt": attempt, "content": content,
+                    }, ensure_ascii=False) + "\n")
+                value = _json_object(content)
+                compact_summary = str(value.get("story_summary", "")).strip()
+                if not compact_summary or spoken_word_count(
+                    compact_summary, state["config"].get("language", "en"),
+                ) > 300:
+                    raise TheaterError("context compaction returned an empty or oversized story summary")
+                continuity_memory = self._validated_continuity_memory(value.get("continuity_memory"))
+                after_chars = (
+                    len(compact_summary)
+                    + len(json.dumps(continuity_memory, ensure_ascii=False))
+                    + len(json.dumps(planner_descriptors[-3:], ensure_ascii=False))
+                )
+                if after_chars > max(1200, math.ceil(before_chars * 1.10)):
+                    raise TheaterError(
+                        f"context compaction grew the planning payload from {before_chars} to {after_chars} characters"
+                    )
+                state["story_summary"] = compact_summary
+                state["continuity_memory"] = continuity_memory
+                state["context_compacted_through_scene"] = through_scene
+                metrics.update({
+                    "context_compaction_count": int(metrics.get("context_compaction_count") or 0) + 1,
+                    "last_context_compaction_scene": through_scene,
+                    "context_compaction_elapsed_seconds": completion_metrics["elapsed_seconds"],
+                    "context_compaction_prompt_tokens": completion_metrics["prompt_tokens"],
+                    "context_compaction_before_chars": before_chars,
+                    "context_compaction_after_chars": after_chars,
+                    "context_compaction_profile": writer_profile,
+                })
+                total_compaction_seconds = time.perf_counter() - compaction_started
+                if writer_profile == "cpu":
+                    previous_compaction = float(metrics.get("context_compaction_elapsed_ema") or 0)
+                    metrics["context_compaction_elapsed_ema"] = round(
+                        total_compaction_seconds if not previous_compaction
+                        else previous_compaction * 0.7 + total_compaction_seconds * 0.3,
+                        3,
+                    )
+                else:
+                    metrics["gpu_context_compaction_seconds"] = round(total_compaction_seconds, 3)
+                metrics.pop("context_compaction_error", None)
+                metrics.pop("context_compaction_started_at", None)
+                events = list(metrics.get("context_compaction_events") or [])[-19:]
+                events.append({
+                    "through_scene": through_scene, "reason": reason, "profile": writer_profile,
+                    "completed_at": time.time(), "before_chars": before_chars, "after_chars": after_chars,
+                    "elapsed_seconds": completion_metrics["elapsed_seconds"],
+                })
+                metrics["context_compaction_events"] = events
+                self._save(state)
+                return True
+            except asyncio.CancelledError:
+                metrics.pop("context_compaction_started_at", None)
+                raise
+            except Exception as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "Context compaction through scene %s attempt %s failed: %s",
+                    through_scene, attempt, exc,
+                )
+        metrics.update({
+            "context_compaction_failures": int(metrics.get("context_compaction_failures") or 0) + 1,
+            "context_compaction_error": str(last_error)[:500],
+        })
+        metrics.pop("context_compaction_started_at", None)
+        self._save(state)
+        return False
+
+    @staticmethod
+    def _recent_scene_context(
+        state: dict[str, Any], recent: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Use three pre-compaction anchors, then grow back to the normal ten-scene window."""
+        compacted_through = int(state.get("context_compacted_through_scene") or 0)
+        if not compacted_through:
+            return recent[-10:]
+        anchors = [item for item in recent if int(item["number"]) <= compacted_through][-3:]
+        after_compaction = [item for item in recent if int(item["number"]) > compacted_through]
+        return (anchors + after_compaction)[-10:]
+
     async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
         words = self._target_words(state)
         request_minimum, request_maximum = self._narration_request_limits(state)
@@ -1114,18 +1318,25 @@ class TheaterManager:
         sentence_maximum = max(sentence_minimum, math.floor(request_maximum / sentence_count))
         language = state["config"].get("language", "en")
         language_name = self.LANGUAGE_NAMES.get(language, language)
-        prior = [{"number": s["number"], "title": s["title"], "beat": s["beat"], "visual_action": s["visual_action"]} for s in recent[-10:]]
+        recent_context = self._recent_scene_context(state, recent)
+        prior = [
+            {"number": s["number"], "title": s["title"], "beat": s["beat"], "visual_action": s["visual_action"]}
+            for s in recent_context
+        ]
         used_hashes = [s.get("asset_fingerprint") for s in state.get("planned", [])[-30:]]
         request = (
             f"Story bible: {json.dumps(state['bible'], ensure_ascii=False)}\n"
-            f"Current story summary: {state.get('story_summary')}\nRecent scenes: {json.dumps(prior, ensure_ascii=False)}\n"
+            f"Current story summary: {state.get('story_summary')}\n"
+            f"Structured continuity memory: {json.dumps(state.get('continuity_memory', {}), ensure_ascii=False)}\n"
+            f"Recent scenes: {json.dumps(prior, ensure_ascii=False)}\n"
             f"Write every natural-language value only in {language_name}; do not switch to English. "
             f"Create scene {number} with {request_minimum}-{request_maximum} source-language narration words. "
             f"This is a hard playback-duration budget: use exactly {sentence_count} complete sentences, make every "
             f"sentence contain {sentence_minimum}-{sentence_maximum} words and advance the action, and do not use "
             "recap or filler to reach the range. "
             "It must obey every premise_contract item and continuity rule, follow causally, introduce a new meaningful "
-            "development, and remain open-ended. Keep the JSON compact and do not add fields. "
+            "development, and remain open-ended. Replace story_summary with a compact current-state summary of at most "
+            "250 words; never append a scene transcript. Keep the JSON compact and do not add fields. "
             f"Avoid these prior asset fingerprints: {used_hashes}. Return "
             "{story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}} only.\n\n"
             f"OFFLINE ENCYCLOPEDIA EXCERPTS — use no real-world claims beyond these:\n{self._grounding_text(state)}"
@@ -1218,6 +1429,8 @@ class TheaterManager:
                     await queue.put({"_error": f"The local writer could not verify scene 1: {exc}"})
                     return
             else:
+                if self._context_compaction_due(state):
+                    await self._compact_story_context(state, reason="interval")
                 last_error: Exception | None = None
                 scene = None
                 for attempt in range(1, 4):
@@ -1708,6 +1921,10 @@ class TheaterManager:
                         story_summary=bootstrap["story_summary"], bootstrap_scene=bootstrap["scene"],
                     )
                     self._save(state)
+                if reason == "adaptive_refill":
+                    await self._compact_story_context(state, reason="adaptive_refill")
+                elif self._context_compaction_due(state):
+                    await self._compact_story_context(state, reason="gpu_resume_interval")
                 prepared = await self._fill_story_buffer(
                     state, self.GPU_BURST_TARGET, excluded_numbers,
                 )
@@ -1808,6 +2025,7 @@ class TheaterManager:
         translation_started = float(
             metrics.get("translation_cycle_started_at") or metrics.get("translation_request_started_at") or 0
         )
+        compaction_started = float(metrics.get("context_compaction_started_at") or 0)
         planner_started = float(
             metrics.get("planner_cycle_started_at") or metrics.get("planner_request_started_at") or 0
         )
@@ -1815,6 +2033,12 @@ class TheaterManager:
             return max(0.0, translation_seconds - max(0.0, now - translation_started))
         if source_queue.qsize():
             return translation_seconds
+        if compaction_started:
+            expected_compaction = float(metrics.get("context_compaction_elapsed_ema") or 0)
+            if not expected_compaction:
+                expected_compaction = planner_seconds * 1.25
+            compaction_remaining = max(0.0, expected_compaction - max(0.0, now - compaction_started))
+            return compaction_remaining + planner_seconds + translation_seconds
         if planner_started:
             planner_remaining = max(0.0, planner_seconds - max(0.0, now - planner_started))
             return planner_remaining + translation_seconds
