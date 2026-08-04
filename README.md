@@ -9,6 +9,7 @@ This repository contains the application code only. Model weights, Wikipedia arc
 - Single Wan 2.2 text-to-video clips with the tested two-stage LightX2V workflow.
 - One-sentence movie planning, progressive generation, editable per-clip timing, subtitles, EDL, CSV shot list, and final MP4 export.
 - Endless offline theater with a bounded Gemma GPU opening burst, Gemma/Supertonic sustaining work on CPU, and Wan rendering on the GPU.
+- Live world direction during Endless Theater: inject a one-scene event or a persistent future rule without replacing completed media.
 - Optional bilingual language-learning playback: every story sentence is displayed and spoken first in the selected story language and then in the learner's translation language.
 - Progressive playback: completed scenes appear while later scenes are still being planned and generated.
 - Optional fail-closed educational grounding from local Kiwix ZIM archives.
@@ -130,6 +131,16 @@ Gemma planning, Supertonic speech, Wan rendering, and FFmpeg assembly overlap. P
 The live duration controller measures the interval between fully archived scenes, learns the actual seconds per spoken word and bilingual expansion ratio for the selected languages and voice, and targets 1.08× playback coverage inside the configured word budget. Gemma's sentence plan and a broad safe duration envelope are validated without retrying ordinary language-dependent word variation. Supertonic remains within a natural 0.96–1.05 speed range and changes pace only for the residual duration error; pacing is not randomized. The synchronization graph performs interpolation, forward/reverse coverage, encoding, and audio muxing in one FFmpeg pass, avoiding repeated lossy H.264 encodes.
 
 The writer stores a structured cast, world, visual style, binding premise contract, and continuity rules. Explicit character counts, objects, actions, threats, and settings in the user's prompt are treated as non-negotiable.
+
+### Live world direction
+
+While a Theater session is open, **Direct the world while it runs** accepts either an event for the next unrendered scene or a persistent world rule. A one-scene event is consumed exactly once; a persistent rule remains visible and removable. Each add, application, and removal is recorded in `logs/live_directives.jsonl`, while current directive state is stored in `session.json` and `archive.json` for offline resume.
+
+This is deliberately not described as a real-time world model. Gemma plans symbolic scene state, Wan renders one clip at a time, Supertonic speaks it, and FFmpeg assembles it. The control latency is therefore the next **unrendered scene**, not the next frame. A visual already rendering is allowed to finish, and completed MP4/WAV assets are never deleted or rewritten by steering.
+
+To make that contract reliable, every new speculative plan carries a causal-state checkpoint. When live input arrives, the planner and translator stop at a safe await boundary, the app restores the checkpoint before the first unrendered plan, drops only that speculative text suffix, and rebuilds its bounded queues. Rolling story summary, structured continuity memory, compaction boundary, and one-shot directive status move together. Older saved buffers without these checkpoints remain playable and apply the direction after their existing buffer rather than guessing at a rollback.
+
+The design follows the useful interaction vocabulary of modern world-model research—persistent environments plus promptable events—without requiring a new experimental model or claiming frame-level simulation. See Google DeepMind's [Genie model overview](https://deepmind.google/models/genie/) and [prompt guide](https://deepmind.google/models/genie/prompt-guide/) for the distinction. On this hardware, event-sourced scene steering is the maintainable option: it adds negligible VRAM use, preserves the measured Gemma/Wan resource split, survives restart, and can later drive another planner or renderer through the same directive API.
 
 ### Language-learning mode
 

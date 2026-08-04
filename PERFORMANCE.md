@@ -180,6 +180,16 @@ An educational-mode attempt is intentionally excluded from the comparison. Its r
 
 ## Current deliberate tradeoffs
 
+### Scene-bound live steering instead of a resident world model
+
+Modern interactive world models combine a persistent generated environment with low-latency actions and promptable events. The installed pipeline cannot reproduce that frame-level architecture: Wan produces a bounded video clip in tens of seconds and cannot remain resident beside Gemma within 12 GB VRAM. Installing another experimental model would not remove that physical scheduling constraint.
+
+Live direction therefore operates at the durable scene-planning boundary. Adding a direction sets an in-process wake event and appends a versioned record to the session. The current Wan render is protected. The CPU planner and translation workers are cancelled at cooperative await boundaries, causal state is restored from the first unrendered plan's checkpoint, only the speculative text suffix is discarded, and the existing bounded workers are reconstructed. Persistent rules are included in every later Gemma request; a one-scene event is atomically marked applied with the accepted plan and is reopened if that plan is rolled back.
+
+This costs a replanning cycle after user intervention but does not add a continuously resident model, VRAM contention, or a new inference service. It also prevents the more damaging failure mode where `story_summary` contains discarded future events. Measure steering latency from directive creation to the `applied_scene` plan and then to that segment's `created` timestamp. Do not report browser submission latency as world response time. Completed media and a render already submitted to ComfyUI are intentionally immutable, so the honest UI promise is “next unrendered scene,” not “instant.”
+
+The directive schema and HTTP boundary are renderer-independent. A future validated local world model can consume the same `next_scene` and `persistent` events while keeping the archive and UI contract. Until such a model fits and demonstrates better end-to-end latency and continuity on this machine, this boundary is the long-term compatibility layer rather than a temporary prompt concatenation trick.
+
 ### Hybrid Gemma GPU burst and CPU sustain
 
 The steady-state writer runs with `-ngl 0`, eight CPU threads, two parallel request slots, a 32K shared context allocation that preserves 16K per slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping this sustaining writer off the GPU allows planning and translation to overlap Wan rendering.

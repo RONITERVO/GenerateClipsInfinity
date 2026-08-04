@@ -747,6 +747,25 @@ async def api_theater_resume(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
 
+async def api_theater_live_directive(request: web.Request) -> web.Response:
+    try:
+        raw = await request.json()
+        return web.json_response(THEATER.add_live_directive(
+            request.match_info["session_id"], raw.get("text", ""), str(raw.get("scope", "next_scene")),
+        ))
+    except (TheaterError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
+async def api_theater_remove_directive(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(THEATER.remove_live_directive(
+            request.match_info["session_id"], request.match_info["directive_id"],
+        ))
+    except TheaterError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
 async def api_theater_voice_preview(request: web.Request) -> web.Response:
     try:
         raw = await request.json()
@@ -870,6 +889,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/theater/{session_id}", api_theater_status)
     app.router.add_post("/api/theater/{session_id}/stop", api_theater_stop)
     app.router.add_post("/api/theater/{session_id}/resume", api_theater_resume)
+    app.router.add_post("/api/theater/{session_id}/directives", api_theater_live_directive)
+    app.router.add_delete("/api/theater/{session_id}/directives/{directive_id}", api_theater_remove_directive)
     app.router.add_post("/api/shutdown", api_shutdown)
     app.router.add_static("/static/", STATIC_DIR, show_index=False)
     app.on_startup.append(on_startup)

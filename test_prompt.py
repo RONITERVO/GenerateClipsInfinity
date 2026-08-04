@@ -318,6 +318,7 @@ class PromptTests(unittest.TestCase):
                 "story_summary": "Mira guards the gate.",
                 "continuity_memory": {"active_threads": ["Find the key"]},
                 "context_compacted_through_scene": 30,
+                "live_directives": [{"id": "rain", "scope": "persistent", "status": "active", "text": "It rains."}],
                 "metrics": {"context_compaction_events": [{"through_scene": 30}]},
             }
             manager._write_playlist(state)
@@ -325,6 +326,7 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(archive["context_compacted_through_scene"], 30)
         self.assertEqual(archive["continuity_memory"]["active_threads"], ["Find the key"])
         self.assertEqual(archive["context_compaction_events"][0]["through_scene"], 30)
+        self.assertEqual(archive["live_directives"][0]["id"], "rain")
 
     def test_coverage_uses_completed_segment_cadence(self):
         async def exercise(root: Path):
@@ -979,9 +981,15 @@ class PromptTests(unittest.TestCase):
                 "config": validate_theater_payload({"prompt": "A path", "translation_language": "fi"}),
                 "bible": {}, "story_summary": "They are ready.",
                 "continuity_memory": {"active_threads": ["Find the gate"]}, "planned": [],
+                "live_directives": [{
+                    "id": "storm", "scope": "next_scene", "status": "pending",
+                    "text": "A sudden storm forces them into the lighthouse.",
+                }],
                 "metrics": {"production_ema": 40.0},
             }
             scene = await manager._plan_next(state, 2, [])
+            manager._log_live_directive = lambda *_args: None
+            manager._mark_directives_applied(state, scene)
             return requests[0], state["metrics"], scene
 
         with tempfile.TemporaryDirectory() as directory:
@@ -991,8 +999,81 @@ class PromptTests(unittest.TestCase):
         self.assertIn("exactly 6 complete sentences", request)
         self.assertIn("sentence contain 7-7 words", request)
         self.assertIn("Find the gate", request)
+        self.assertIn("LIVE WORLD EVENTS AND DIRECTIONS", request)
+        self.assertIn("A sudden storm forces them into the lighthouse", request)
         self.assertEqual(metrics["planner_prompt_tokens"], 420)
         self.assertEqual(scene["planner_metrics"]["elapsed_seconds"], 1.2)
+        self.assertEqual(scene["_live_directive_ids"], ["storm"])
+
+    def test_live_steering_rolls_back_only_unrendered_plans_and_causal_state(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        state = {
+            "story_summary": "Scene three already happened.",
+            "continuity_memory": {"active_threads": ["Wrong future"]},
+            "context_compacted_through_scene": 3,
+            "planned": [
+                {"number": 1, "title": "Archived"},
+                {
+                    "number": 2, "title": "Speculative", "_planning_context_before": {
+                        "story_summary": "Only scene one happened.",
+                        "has_continuity_memory": True,
+                        "continuity_memory": {"active_threads": ["Original thread"]},
+                        "has_compaction_boundary": True,
+                        "context_compacted_through_scene": 1,
+                        "context_compaction_metrics": {"last_context_compaction_scene": 1},
+                    },
+                },
+                {"number": 3, "title": "More speculation"},
+            ],
+            "live_directives": [{
+                "id": "storm", "scope": "next_scene", "status": "applied", "applied_scene": 2,
+            }],
+            "metrics": {
+                "last_context_compaction_scene": 3, "context_compaction_count": 2,
+                "planner_repair_reason": "stale output",
+            },
+        }
+        discarded = manager._rollback_speculative_plans(state, {1})
+        self.assertEqual(discarded, 2)
+        self.assertEqual([item["number"] for item in state["planned"]], [1])
+        self.assertEqual(state["story_summary"], "Only scene one happened.")
+        self.assertEqual(state["continuity_memory"]["active_threads"], ["Original thread"])
+        self.assertEqual(state["context_compacted_through_scene"], 1)
+        self.assertEqual(state["metrics"]["last_context_compaction_scene"], 1)
+        self.assertNotIn("context_compaction_count", state["metrics"])
+        self.assertNotIn("planner_repair_reason", state["metrics"])
+        self.assertEqual(state["live_directives"][0]["status"], "pending")
+        self.assertEqual(state["metrics"]["last_live_steering_scene"], 2)
+
+    def test_live_directive_wakes_running_pipeline_and_persistent_rule_is_removable(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            (root / "session" / "logs").mkdir(parents=True)
+            state = {"id": "session", "planned": [], "segments": [], "metrics": {}, "live_directives": []}
+            task = asyncio.create_task(asyncio.sleep(60))
+            manager.sessions = {"session": state}
+            manager.tasks = {"session": task}
+            manager.steering_events = {"session": asyncio.Event()}
+            manager._save = lambda _state: None
+            try:
+                manager.add_live_directive("session", "  Keep the lighthouse visible.  ", "persistent")
+                added = dict(state["live_directives"][0])
+                woke_for_add = manager.steering_events["session"].is_set()
+                manager.steering_events["session"].clear()
+                manager.remove_live_directive("session", added["id"])
+                return added, woke_for_add, manager.steering_events["session"].is_set(), state
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            added, woke_for_add, woke_for_remove, state = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(added["text"], "Keep the lighthouse visible.")
+        self.assertEqual(added["status"], "active")
+        self.assertTrue(woke_for_add)
+        self.assertTrue(woke_for_remove)
+        self.assertEqual(state["live_directives"][0]["status"], "removed")
 
     def test_live_word_target_stays_inside_custom_budget(self):
         manager = TheaterManager.__new__(TheaterManager)
