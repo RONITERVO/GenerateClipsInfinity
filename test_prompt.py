@@ -90,6 +90,14 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(split_narration_sentences(text), [
             'She said, "Run now!"', "Then they crossed the bridge.", "\u732b\u306f\u8d70\u3063\u305f\u3002", "\u6708\u304c\u51fa\u305f\uff01",
         ])
+        self.assertEqual(
+            split_narration_sentences("\u300c\u884c\u3053\u3046\u3002\u300d\u6b21\u3078\u3002"),
+            ["\u300c\u884c\u3053\u3046\u3002\u300d", "\u6b21\u3078\u3002"],
+        )
+        self.assertEqual(
+            split_narration_sentences("\u300e\u5f85\u3063\u3066\uff01\u300f\u7d42\u308f\u308a\u3002"),
+            ["\u300e\u5f85\u3063\u3066\uff01\u300f", "\u7d42\u308f\u308a\u3002"],
+        )
 
     def test_translation_stage_preserves_one_to_one_sentence_alignment(self):
         async def exercise(root: Path):
@@ -97,31 +105,37 @@ class PromptTests(unittest.TestCase):
             manager.root = root
             (root / "session" / "logs").mkdir(parents=True)
             manager._save = lambda _state: None
+            requests = []
 
             class Writer:
-                async def complete(self, _messages, max_tokens=900):
+                async def complete(self, messages, max_tokens=900):
+                    requests.append(messages[-1]["content"])
                     return (
-                        '{"title_translation":"The Gate","sentences":['
-                        '{"id":1,"translation":"The fox found a key."},'
-                        '{"id":2,"translation":"The gate began to glow."}]}',
+                        '{"title_translation":"Departure","sentences":['
+                        '{"id":1,"translation":"Let us go."},'
+                        '{"id":2,"translation":"Next."}]}',
                         {"tokens_per_second": 12.5},
                     )
 
             manager.writer = Writer()
             state = {
-                "id": "session", "config": {"language": "fi", "translation_language": "en"},
+                "id": "session", "config": {"language": "ja", "translation_language": "en"},
                 "metrics": {},
             }
             scene = {
-                "number": 2, "title": "Portti", "narration": "Kettu l\u00f6ysi avaimen. Portti alkoi hehkua.",
+                "number": 2, "title": "\u51fa\u767a",
+                "narration": "\u300c\u884c\u3053\u3046\u3002\u300d\u6b21\u3078\u3002",
             }
-            return await manager._prepare_narration(state, scene)
+            return await manager._prepare_narration(state, scene), requests
 
         with tempfile.TemporaryDirectory() as directory:
-            result = asyncio.run(exercise(Path(directory)))
-        self.assertEqual(result["translated_title"], "The Gate")
+            result, requests = asyncio.run(exercise(Path(directory)))
+        originals = ["\u300c\u884c\u3053\u3046\u3002\u300d", "\u6b21\u3078\u3002"]
+        self.assertEqual(result["translated_title"], "Departure")
         self.assertEqual(len(result["narration_sentences"]), 2)
-        self.assertEqual(result["narration_sentences"][1]["translation"], "The gate began to glow.")
+        self.assertEqual([pair["original"] for pair in result["narration_sentences"]], originals)
+        self.assertIn(originals[0], requests[0])
+        self.assertIn(originals[1], requests[0])
 
     def test_wav_concatenation_preserves_all_sentence_audio(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -156,16 +170,16 @@ class PromptTests(unittest.TestCase):
 
             runtime.synthesize = synthesize
             await runtime.synthesize_alternating([
-                {"original": "Hyv\u00e4\u00e4 huomenta.", "translation": "Good morning."},
-                {"original": "Menn\u00e4\u00e4n!", "translation": "Let's go!"},
-            ], root / "result.wav", voice="F2", original_language="fi", translation_language="en")
+                {"original": "\u300c\u884c\u3053\u3046\u3002\u300d", "translation": "Let us go."},
+                {"original": "\u6b21\u3078\u3002", "translation": "Next."},
+            ], root / "result.wav", voice="F2", original_language="ja", translation_language="en")
             return calls
 
         with tempfile.TemporaryDirectory() as directory:
             calls = asyncio.run(exercise(Path(directory)))
         self.assertEqual(calls, [
-            ("Hyv\u00e4\u00e4 huomenta.", "fi", "F2"), ("Good morning.", "en", "F2"),
-            ("Menn\u00e4\u00e4n!", "fi", "F2"), ("Let's go!", "en", "F2"),
+            ("\u300c\u884c\u3053\u3046\u3002\u300d", "ja", "F2"), ("Let us go.", "en", "F2"),
+            ("\u6b21\u3078\u3002", "ja", "F2"), ("Next.", "en", "F2"),
         ])
 
     def test_theater_accepts_all_advanced_generation_values(self):

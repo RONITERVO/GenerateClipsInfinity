@@ -62,7 +62,7 @@ def split_narration_sentences(text: str) -> list[str]:
     sentences: list[str] = []
     start = 0
     index = 0
-    closers = {'"', "'", "\u201d", "\u2019", "\u00bb", ")", "]", "}"}
+    closers = {'"', "'", "\u201d", "\u2019", "\u00bb", ")", "]", "}", "\u300d", "\u300f"}
     while index < len(normalized):
         character = normalized[index]
         is_cjk_end = character in "\u3002\uff01\uff1f"
