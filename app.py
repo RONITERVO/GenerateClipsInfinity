@@ -670,6 +670,9 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         min_words = int(supplied_settings.get("min_words", defaults["min_words"]))
         max_words = int(supplied_settings.get("max_words", defaults["max_words"]))
         max_slow = float(supplied_settings.get("max_slow", defaults["max_slow"]))
+        context_compaction_scenes = int(
+            raw.get("context_compaction_scenes", TheaterManager.DEFAULT_CONTEXT_COMPACTION_SCENES)
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("Advanced generation values must be numeric.") from exc
     if width < 192 or width > 832 or width % 16:
@@ -686,6 +689,8 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Maximum narration words must be at least the minimum and no more than 2,400.")
     if max_slow < 1 or max_slow > 20:
         raise ValueError("Maximum slow-motion must be between 1x and 20x.")
+    if context_compaction_scenes != 0 and not 5 <= context_compaction_scenes <= 200:
+        raise ValueError("Context compaction must be 0 (interval off) or between 5 and 200 scenes.")
     quality_settings = {
         "width": width, "height": height, "frames": frames, "fps": fps,
         "min_words": min_words, "max_words": max_words, "max_slow": max_slow,
@@ -695,6 +700,7 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         "quality": "custom", "quality_settings": quality_settings,
         "mode": mode, "audience": audience, "seed": seed,
         "voice": voice, "language": language, "translation_language": translation_language,
+        "context_compaction_scenes": context_compaction_scenes,
     }
 
 
