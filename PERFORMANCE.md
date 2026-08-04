@@ -144,13 +144,33 @@ Important source locations:
 
 ### Parallel translation groundwork
 
-Cinema preview now defaults to 80–110 total spoken words per clip. In bilingual mode the 2.1× speech reservation converts this to approximately 39–52 source words, leaving room for the translated speech inside the same total budget. Planning prompts are clamped to the configured limits rather than expanding beyond them with the older ±25-word range.
+Cinema preview now defaults to 80–110 total spoken words per clip. In bilingual mode the 2.1× speech reservation converts this to approximately 39–52 source words, leaving room for the translated speech inside the same total budget. After production timing exists, the request narrows around the live target while remaining inside those configured limits. This encourages enough narration to cover the fixed render cadence without changing speech speed or visual quality.
 
 The planner produces a source-language scene into a bounded queue. A second worker validates its sentence-aligned translation and places only render-ready scenes into another bounded queue. Meanwhile the planner can use the other llama.cpp slot for the next scene. Saved source plans and translated plans remain distinguishable, so interruption recovery does not repeat finished translations or send incomplete bilingual narration to TTS.
 
-This is groundwork, not a throughput claim. Two simultaneous CPU generations may reduce each request's individual token rate while improving combined throughput and GPU feed continuity. Benchmark at least ten completed scenes and compare end-to-end completion timestamps, not just tokens per second.
+Two simultaneous CPU generations reduce each request's individual token rate but can improve combined throughput and GPU feed continuity. The per-scene archive now records source, translated and total word counts; planner, translation and factual-review timing and prompt sizes; and the wait before Wan receives a render-ready scene. Future benchmarks should use these fields and completed-scene timestamps rather than reconstructing results from mutable session metrics.
 
 The server allocates 32K context across two slots, preserving the earlier 16K ceiling per request. The planner still carries the story bible, rolling story summary, ten recent scene descriptors, and bounded grounding material because continuity may require them. `planner_prompt_tokens`, `translation_prompt_tokens`, stage elapsed time, and queue-depth metrics are saved so future work can identify context-growth slowdown before shortening continuity state. Prefer measured summary compaction over arbitrary truncation.
+
+### Verified Pure story checkpoint
+
+On 2026-08-04 the one-slot and two-slot pipelines were compared over the first ten completed scenes using the same `Beaches around the world` seed, English narration, Spanish translation, M2 voice, 480 × 272 output, 81 source frames, 16 FPS and 80–110 total-word setting. Both used Pure story mode. The two-slot run completed normally and kept two translated scenes ready through scene 10.
+
+| Measurement | One slot | Two slots |
+| --- | ---: | ---: |
+| Completed-scene interval | 40.56 s | 38.79 s |
+| Playable duration | 29.86 s | 32.20 s |
+| End-to-end playback coverage | 0.736× | 0.830× |
+| Wan generation | 41.07 s | 39.54 s |
+| Supertonic | 8.52 s | 9.03 s |
+| FFmpeg assembly | 32.47 s | 33.72 s |
+| Total spoken words | 73.5 | 78.9 |
+
+The important result is queue behavior, not the small wall-time difference: after the opening, Wan did not wait for text. Planning grew from roughly 32 seconds at 928 prompt tokens to roughly 39 seconds at 1,734 tokens, with a 42.5-second observed peak, but the translated-scene buffer absorbed it. Wan therefore remained the steady-state throughput limiter during this checkpoint.
+
+Coverage remained below real time because the model averaged slightly fewer than 80 total words. The narrowed in-budget live target was added after this capture and still requires its own long-run measurement. It does not alter sampling, frames, interpolation, speech rate, translation validation or continuity context.
+
+An educational-mode attempt is intentionally excluded from the comparison. Its required factual-review completion added another dependent Gemma pass and produced GPU waits; that path needs a separate benchmark rather than being mixed with Pure story results.
 
 ## Current deliberate tradeoffs
 

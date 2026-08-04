@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import time
 import unittest
 import wave
 from pathlib import Path
@@ -136,6 +137,10 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(result["translated_title"], "Departure")
         self.assertEqual(len(result["narration_sentences"]), 2)
         self.assertEqual([pair["original"] for pair in result["narration_sentences"]], originals)
+        self.assertEqual(result["source_word_count"], 2)
+        self.assertEqual(result["translation_word_count"], 4)
+        self.assertEqual(result["total_spoken_words"], 6)
+        self.assertEqual(result["translation_metrics"]["prompt_tokens"], 96)
         self.assertIn(originals[0], requests[0])
         self.assertIn(originals[1], requests[0])
 
@@ -155,6 +160,46 @@ class PromptTests(unittest.TestCase):
             with wave.open(str(combined), "rb") as result:
                 self.assertEqual(result.getnframes(), sum(frame_counts))
                 self.assertEqual(result.getframerate(), 8000)
+
+    def test_archived_scene_keeps_pipeline_metrics(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root / "wan_theater"
+            manager.output_root = root
+            manager._save = lambda _state: None
+
+            async def synchronize(_state, _scene, _video, _audio):
+                return root / "wan_theater" / "session" / "segments" / "scene_00002.mp4", {
+                    "raw_video_duration": 5.0, "duration": 30.0, "slow_duration": 30.0,
+                    "motion_repeated": False, "estimated_motion_cycles": 1.0,
+                }
+
+            manager._synchronize = synchronize
+            scene = {
+                "number": 2, "title": "Path", "beat": "Departure", "narration": "They leave.",
+                "visual_action": "They cross a bridge.", "asset_fingerprint": "abc123",
+                "source_word_count": 2, "translation_word_count": 3, "total_spoken_words": 5,
+                "planner_metrics": {"elapsed_seconds": 10.0, "prompt_tokens": 900},
+                "translation_metrics": {"elapsed_seconds": 4.0, "prompt_tokens": 90},
+                "gpu_feed_wait_seconds": 0.25,
+            }
+            state = {
+                "id": "session", "config": {"language": "en"}, "segments": [],
+                "metrics": {"production_ema": 0.0}, "rendering_scene": 3,
+            }
+            await manager._assemble_scene(state, {
+                "scene": scene, "video_rel": "raw.mp4", "audio_rel": "audio.wav",
+                "audio_path": root / "audio.wav", "video_seconds": 20.0, "tts_seconds": 3.0,
+                "ready_seconds": 20.0, "cycle_started": time.perf_counter() - 20.0,
+            })
+            return state["segments"][0]
+
+        with tempfile.TemporaryDirectory() as directory:
+            entry = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(entry["total_spoken_words"], 5)
+        self.assertEqual(entry["planner_metrics"]["prompt_tokens"], 900)
+        self.assertEqual(entry["translation_metrics"]["elapsed_seconds"], 4.0)
+        self.assertEqual(entry["gpu_feed_wait_seconds"], 0.25)
 
     def test_bilingual_tts_alternates_original_then_translation(self):
         async def exercise(root: Path):
@@ -356,15 +401,30 @@ class PromptTests(unittest.TestCase):
             state = {
                 "id": "session",
                 "config": validate_theater_payload({"prompt": "A path", "translation_language": "fi"}),
-                "bible": {}, "story_summary": "They are ready.", "planned": [], "metrics": {},
+                "bible": {}, "story_summary": "They are ready.", "planned": [],
+                "metrics": {"production_ema": 40.0},
             }
-            await manager._plan_next(state, 2, [])
-            return requests[0], state["metrics"]
+            scene = await manager._plan_next(state, 2, [])
+            return requests[0], state["metrics"], scene
 
         with tempfile.TemporaryDirectory() as directory:
-            request, metrics = asyncio.run(exercise(Path(directory)))
-        self.assertIn("Create scene 2 with 39-52 narration words", request)
+            request, metrics, scene = asyncio.run(exercise(Path(directory)))
+        self.assertIn("Create scene 2 with 44-52 narration words", request)
         self.assertEqual(metrics["planner_prompt_tokens"], 420)
+        self.assertEqual(scene["planner_metrics"]["elapsed_seconds"], 1.2)
+
+    def test_live_word_target_stays_inside_custom_budget(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        bilingual = {
+            "config": validate_theater_payload({"prompt": "A path", "translation_language": "fi"}),
+            "metrics": {"production_ema": 40.0},
+        }
+        monolingual = {
+            "config": validate_theater_payload({"prompt": "A path"}),
+            "metrics": {"production_ema": 40.0},
+        }
+        self.assertEqual(manager._narration_request_limits(bilingual), (44, 52))
+        self.assertEqual(manager._narration_request_limits(monolingual), (102, 110))
 
     def test_theater_planner_keeps_two_scenes_ahead(self):
         async def exercise():

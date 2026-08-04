@@ -628,6 +628,7 @@ class TheaterManager:
                 "planner_tps": 0.0, "production_ema": 0.0, "coverage_ratio": 0.0,
                 "writer_parallel_slots": self.writer.parallel_slots,
                 "parallel_translation": bool(self.translation_language(config)),
+                "gpu_feed_wait_seconds": 0.0,
             },
         }
         directory = self._dir(session_id)
@@ -819,6 +820,9 @@ class TheaterManager:
                     {"title": item["title"], "url": item["url"]}
                     for item in state["grounding"]["sources"] if item["title"] == selected["source"]
                 ]
+                if scene.get("planner_metrics"):
+                    checked["planner_metrics"] = scene["planner_metrics"]
+                checked["fact_check_metrics"] = dict(metrics)
                 state["metrics"]["fact_check_tps"] = metrics["tokens_per_second"]
                 return checked
             except Exception as exc:
@@ -839,6 +843,9 @@ class TheaterManager:
         scene["translation_language"] = target_language
         if not target_language:
             scene["narration_sentences"] = [{"original": sentence} for sentence in originals]
+            scene["source_word_count"] = len(str(scene.get("narration", "")).split())
+            scene["translation_word_count"] = 0
+            scene["total_spoken_words"] = scene["source_word_count"]
             return scene
 
         numbered = [{"id": index, "text": sentence} for index, sentence in enumerate(originals, 1)]
@@ -882,6 +889,10 @@ class TheaterManager:
                     aligned.append({"original": original, "translation": text})
                 scene["translated_title"] = translated_title
                 scene["narration_sentences"] = aligned
+                scene["source_word_count"] = sum(len(pair["original"].split()) for pair in aligned)
+                scene["translation_word_count"] = sum(len(pair["translation"].split()) for pair in aligned)
+                scene["total_spoken_words"] = scene["source_word_count"] + scene["translation_word_count"]
+                scene["translation_metrics"] = dict(metrics)
                 state["metrics"]["translation_tps"] = metrics["tokens_per_second"]
                 state["metrics"]["translation_elapsed_seconds"] = metrics["elapsed_seconds"]
                 state["metrics"]["translation_prompt_tokens"] = metrics["prompt_tokens"]
@@ -928,6 +939,7 @@ class TheaterManager:
         if any(key not in bible for key in required_bible):
             raise TheaterError("The local writer's story bible did not preserve the full premise contract.")
         value["scene"] = self._scene_object(value["scene"], "bootstrap")
+        value["scene"]["planner_metrics"] = dict(metrics)
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
         return value
 
@@ -940,11 +952,16 @@ class TheaterManager:
         speech_multiplier = 2.1 if self.translation_language(state["config"]) else 1.0
         return int(max(minimum_words, min(maximum_words, production * 4.6 / speech_multiplier)))
 
-    async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
+    def _narration_request_limits(self, state: dict[str, Any]) -> tuple[int, int]:
+        """Stay near the live target without leaving the configured word budget."""
         minimum_words, maximum_words = self.narration_word_limits(state["config"])
         words = self._target_words(state)
-        request_minimum = max(minimum_words, words - 25)
-        request_maximum = min(maximum_words, words + 25)
+        margin = min(25, max(8, math.ceil((maximum_words - minimum_words) * 0.25)))
+        return max(minimum_words, words - margin), min(maximum_words, words + margin)
+
+    async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
+        words = self._target_words(state)
+        request_minimum, request_maximum = self._narration_request_limits(state)
         language = state["config"].get("language", "en")
         language_name = self.LANGUAGE_NAMES.get(language, language)
         prior = [{"number": s["number"], "title": s["title"], "beat": s["beat"], "visual_action": s["visual_action"]} for s in recent[-10:]]
@@ -978,6 +995,7 @@ class TheaterManager:
         if scene["asset_fingerprint"] in {s.get("asset_fingerprint") for s in state.get("planned", [])}:
             scene["visual_action"] += f" The action resolves with a unique physical change specific to scene {number}."
             scene["asset_fingerprint"] = hashlib.sha256((fingerprint_text + str(number)).encode()).hexdigest()[:16]
+        scene["planner_metrics"] = dict(metrics)
         state["story_summary"] = str(value.get("story_summary") or state.get("story_summary"))
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
         state["metrics"]["planner_elapsed_seconds"] = metrics["elapsed_seconds"]
@@ -1292,6 +1310,13 @@ class TheaterManager:
             "narration": scene["narration"], "learning_point": scene.get("learning_point", ""),
             "translated_title": scene.get("translated_title", ""),
             "narration_sentences": scene.get("narration_sentences", []),
+            "source_word_count": scene.get("source_word_count"),
+            "translation_word_count": scene.get("translation_word_count"),
+            "total_spoken_words": scene.get("total_spoken_words"),
+            "planner_metrics": scene.get("planner_metrics", {}),
+            "translation_metrics": scene.get("translation_metrics", {}),
+            "fact_check_metrics": scene.get("fact_check_metrics", {}),
+            "gpu_feed_wait_seconds": round(float(scene.get("gpu_feed_wait_seconds") or 0), 3),
             "source_language": scene.get("source_language", state["config"].get("language", "en")),
             "translation_language": scene.get("translation_language", ""),
             "sources": scene.get("sources", []),
@@ -1394,11 +1419,20 @@ class TheaterManager:
                     if error:
                         raise TheaterError(f"The scene assembly worker failed: {error}") from error
                     raise TheaterError("The scene assembly worker stopped unexpectedly.")
+                ready_wait_started = time.perf_counter()
                 scene = await self._next_planned_scene(ready_queue, translation_task)
+                ready_wait_seconds = time.perf_counter() - ready_wait_started
                 if scene.get("_error"):
                     raise TheaterError(scene["_error"])
                 if any(int(item["number"]) == int(scene["number"]) for item in state.get("segments", [])):
                     continue
+                scene["gpu_feed_wait_seconds"] = round(ready_wait_seconds, 3)
+                state["metrics"]["last_gpu_feed_wait_seconds"] = round(ready_wait_seconds, 3)
+                state["metrics"]["gpu_feed_wait_seconds"] = round(
+                    float(state["metrics"].get("gpu_feed_wait_seconds") or 0) + ready_wait_seconds,
+                    3,
+                )
+                state["metrics"]["translated_scene_queue"] = ready_queue.qsize()
                 work_item = await self._render_scene(state, scene)
                 if assembly_task.done():
                     error = assembly_task.exception()

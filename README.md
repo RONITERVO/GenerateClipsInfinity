@@ -132,11 +132,11 @@ The writer stores a structured cast, world, visual style, binding premise contra
 
 Choose the language of the story under **Narration language**, then choose a different **Language-learning translation**. Gemma keeps the story itself in the first language and produces a validated one-to-one translation for every sentence. The Theater UI displays the paired sentences and Supertonic speaks each original sentence immediately followed by its translation.
 
-The Cinema preview default is 80–110 total spoken words per clip. The Advanced minimum and maximum values use the same total-spoken-word definition. When translation is enabled, the planner reduces source prose before generation to reserve approximately half of that budget for translated speech. This keeps bilingual scenes close to the normal scene duration instead of doubling them or unnaturally accelerating the voice.
+The Cinema preview default is 80–110 total spoken words per clip. The Advanced minimum and maximum values use the same total-spoken-word definition. When translation is enabled, the planner reduces source prose before generation to reserve approximately half of that budget for translated speech. Once live production timing is available, requests move toward the required part of that range without exceeding it. This keeps bilingual scenes close to the normal scene duration instead of doubling them or unnaturally accelerating the voice.
 
 Gemma uses two bounded CPU request slots: one can plan the next source scene while the other produces the current scene's validated sentence translations. Each slot retains a 16K context ceiling. The separate translation gate still fails closed on missing, reordered, combined, or split sentences; concurrency does not weaken archive or TTS alignment.
 
-Sentence pairs, language codes, translated titles, and the complete configuration are stored in the ordinary session and archive JSON. Version 1 sessions without bilingual fields remain playable and resumable.
+Sentence pairs, language codes, translated titles, the complete configuration, word counts, model timing/context, and GPU-feed wait are stored in the ordinary session and archive JSON. Version 1 sessions without bilingual fields remain playable and resumable.
 
 ## Development
 
