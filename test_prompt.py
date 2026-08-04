@@ -65,6 +65,8 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(config["voice"], "M1")
         self.assertEqual(config["language"], "en")
         self.assertEqual(config["translation_language"], "")
+        self.assertEqual(config["quality_settings"]["min_words"], 80)
+        self.assertEqual(config["quality_settings"]["max_words"], 110)
         self.assertGreaterEqual(config["seed"], 0)
 
     def test_theater_accepts_distinct_offline_translation_language(self):
@@ -81,7 +83,7 @@ class PromptTests(unittest.TestCase):
     def test_bilingual_word_budget_reduces_source_prose(self):
         config = validate_theater_payload({"prompt": "A story", "translation_language": "fi"})
         minimum, maximum = TheaterManager.narration_word_limits(config)
-        self.assertEqual((minimum, maximum), (105, 285))
+        self.assertEqual((minimum, maximum), (39, 52))
         self.assertLess(minimum, config["quality_settings"]["min_words"])
         self.assertLess(maximum, config["quality_settings"]["max_words"])
 
@@ -114,7 +116,7 @@ class PromptTests(unittest.TestCase):
                         '{"title_translation":"Departure","sentences":['
                         '{"id":1,"translation":"Let us go."},'
                         '{"id":2,"translation":"Next."}]}',
-                        {"tokens_per_second": 12.5},
+                        {"tokens_per_second": 12.5, "elapsed_seconds": 0.4, "prompt_tokens": 96},
                     )
 
             manager.writer = Writer()
@@ -268,7 +270,101 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(runtime.model, model)
             self.assertEqual(runtime.model_alias, StoryRuntime.GEMMA4_E4B_ALIAS)
             self.assertEqual(runtime.threads, 8)
+            self.assertEqual(runtime.parallel_slots, 2)
+            self.assertEqual(runtime.context_tokens_per_slot, 16384)
+            args = runtime._server_args(root / "runtime" / "llama-server.exe")
+            self.assertEqual(args[args.index("--parallel") + 1], "2")
+            self.assertEqual(args[args.index("-c") + 1], "32768")
             self.assertEqual(runtime.sampling["top_k"], 64)
+
+    def test_planning_overlaps_translation_through_bounded_queues(self):
+        async def exercise():
+            manager = TheaterManager.__new__(TheaterManager)
+            manager._save = lambda _state: None
+            second_plan_started = asyncio.Event()
+            first_translation_started = asyncio.Event()
+
+            async def plan(_state, number, _recent):
+                if number == 2:
+                    second_plan_started.set()
+                    await asyncio.wait_for(first_translation_started.wait(), timeout=1)
+                return {"number": number, "title": f"Scene {number}"}
+
+            async def translate(_state, scene):
+                if scene["number"] == 1:
+                    first_translation_started.set()
+                    await asyncio.wait_for(second_plan_started.wait(), timeout=1)
+                scene["narration_sentences"] = [{"original": f"Words {scene['number']}."}]
+                return scene
+
+            manager._plan_next = plan
+            manager._prepare_narration = translate
+            state = {"config": {"language": "en", "translation_language": "fi"}, "planned": [], "metrics": {}}
+            source_queue = asyncio.Queue(maxsize=3)
+            ready_queue = asyncio.Queue(maxsize=3)
+            planner = asyncio.create_task(manager._planner_loop(state, source_queue))
+            translator = asyncio.create_task(
+                manager._translation_loop(state, source_queue, ready_queue, planner)
+            )
+            ready = await asyncio.wait_for(ready_queue.get(), timeout=1)
+            planner.cancel()
+            translator.cancel()
+            await asyncio.gather(planner, translator, return_exceptions=True)
+            return ready, second_plan_started.is_set(), first_translation_started.is_set()
+
+        ready, planned_in_parallel, translated_in_parallel = asyncio.run(exercise())
+        self.assertEqual(ready["number"], 1)
+        self.assertTrue(planned_in_parallel)
+        self.assertTrue(translated_in_parallel)
+
+    def test_resume_only_retranslates_incomplete_saved_scenes(self):
+        bilingual = {"language": "fi", "translation_language": "en"}
+        source_only = {"narration_sentences": [{"original": "Lähdetään."}]}
+        translated = {
+            "translated_title": "Departure",
+            "narration_sentences": [{"original": "Lähdetään.", "translation": "Let us go."}],
+        }
+        self.assertFalse(TheaterManager._narration_is_prepared(bilingual, source_only))
+        self.assertTrue(TheaterManager._narration_is_prepared(bilingual, translated))
+        self.assertTrue(TheaterManager._narration_is_prepared(
+            {"language": "fi", "translation_language": ""}, source_only,
+        ))
+
+    def test_bilingual_planner_prompt_stays_inside_default_total_budget(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            (root / "session" / "logs").mkdir(parents=True)
+            requests = []
+
+            class Writer:
+                async def complete(self, messages, max_tokens=900):
+                    requests.append(messages[-1]["content"])
+                    return (
+                        '{"story_summary":"Moving onward","scene":{"number":2,"title":"Path",'
+                        '"beat":"They depart","narration":"They follow the path.",'
+                        '"visual_action":"The group crosses a bridge","camera":"wide tracking",'
+                        '"learning_point":""}}',
+                        {"tokens_per_second": 14.0, "elapsed_seconds": 1.2, "prompt_tokens": 420},
+                    )
+
+            async def verify(_state, scene):
+                return scene
+
+            manager.writer = Writer()
+            manager._verify_scene = verify
+            state = {
+                "id": "session",
+                "config": validate_theater_payload({"prompt": "A path", "translation_language": "fi"}),
+                "bible": {}, "story_summary": "They are ready.", "planned": [], "metrics": {},
+            }
+            await manager._plan_next(state, 2, [])
+            return requests[0], state["metrics"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            request, metrics = asyncio.run(exercise(Path(directory)))
+        self.assertIn("Create scene 2 with 39-52 narration words", request)
+        self.assertEqual(metrics["planner_prompt_tokens"], 420)
 
     def test_theater_planner_keeps_two_scenes_ahead(self):
         async def exercise():

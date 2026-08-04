@@ -105,9 +105,23 @@ class StoryRuntime:
         self.model_alias = self.GEMMA4_E4B_ALIAS
         self.model_label = "Gemma 4 E4B Q4_K_M"
         # Measured fastest decoding on this Ryzen 9 7950X: 15.31 t/s.
-        # Eight threads leave the other physical cores for TTS and FFmpeg.
+        # Eight threads leave the other physical cores for TTS and FFmpeg. Two
+        # slots let the next story plan overlap the current translation. llama.cpp
+        # divides the configured context across slots, so keep 16K per request.
         self.threads = 8
+        self.parallel_slots = 2
+        self.context_tokens_per_slot = 16384
         self.sampling = {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "presence_penalty": 0.0}
+
+    def _server_args(self, server: Path) -> list[str]:
+        return [
+            str(server), "-m", str(self.model), "--alias", self.model_alias,
+            "--host", "127.0.0.1", "--port", "8083", "-ngl", "0",
+            "-t", str(self.threads), "-tb", str(self.threads),
+            "-c", str(self.context_tokens_per_slot * self.parallel_slots),
+            "--parallel", str(self.parallel_slots), "--batch-size", "512", "--ubatch-size", "128",
+            "--no-mmap", "--jinja", "--reasoning", "off", "--metrics",
+        ]
 
     async def healthy(self) -> bool:
         try:
@@ -136,13 +150,7 @@ class StoryRuntime:
                     f"{self.model} and the llama.cpp server at {server}."
                 )
             log_dir.mkdir(parents=True, exist_ok=True)
-            args = [
-                str(server), "-m", str(self.model), "--alias", self.model_alias,
-                "--host", "127.0.0.1", "--port", "8083", "-ngl", "0",
-                "-t", str(self.threads), "-tb", str(self.threads), "-c", "16384", "--parallel", "1",
-                "--batch-size", "512", "--ubatch-size", "128", "--no-mmap",
-                "--jinja", "--reasoning", "off", "--metrics",
-            ]
+            args = self._server_args(server)
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             env = os.environ.copy()
             env.update({
@@ -485,7 +493,7 @@ class TheaterManager:
     }
     CINEMA_DEFAULTS = {
         "width": 480, "height": 272, "frames": 81, "fps": 16,
-        "min_words": 220, "max_words": 600, "max_slow": 8.0,
+        "min_words": 80, "max_words": 110, "max_slow": 8.0,
     }
     # Kept only so existing archived sessions remain resumable after the preset UI was removed.
     LEGACY_QUALITY = {
@@ -616,7 +624,11 @@ class TheaterManager:
             "status": "starting", "message": f"Loading {self.writer.model_label} into system RAM...",
             "config": config, "title": None, "bible": None, "planned": [], "segments": [],
             "current_scene": 0, "total_duration": 0.0, "buffer_seconds": 0.0,
-            "metrics": {"planner_tps": 0.0, "production_ema": 0.0, "coverage_ratio": 0.0},
+            "metrics": {
+                "planner_tps": 0.0, "production_ema": 0.0, "coverage_ratio": 0.0,
+                "writer_parallel_slots": self.writer.parallel_slots,
+                "parallel_translation": bool(self.translation_language(config)),
+            },
         }
         directory = self._dir(session_id)
         for sub in ("raw", "audio", "segments", "work", "logs"):
@@ -871,6 +883,8 @@ class TheaterManager:
                 scene["translated_title"] = translated_title
                 scene["narration_sentences"] = aligned
                 state["metrics"]["translation_tps"] = metrics["tokens_per_second"]
+                state["metrics"]["translation_elapsed_seconds"] = metrics["elapsed_seconds"]
+                state["metrics"]["translation_prompt_tokens"] = metrics["prompt_tokens"]
                 return scene
             except (TheaterError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
@@ -927,7 +941,10 @@ class TheaterManager:
         return int(max(minimum_words, min(maximum_words, production * 4.6 / speech_multiplier)))
 
     async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
+        minimum_words, maximum_words = self.narration_word_limits(state["config"])
         words = self._target_words(state)
+        request_minimum = max(minimum_words, words - 25)
+        request_maximum = min(maximum_words, words + 25)
         language = state["config"].get("language", "en")
         language_name = self.LANGUAGE_NAMES.get(language, language)
         prior = [{"number": s["number"], "title": s["title"], "beat": s["beat"], "visual_action": s["visual_action"]} for s in recent[-10:]]
@@ -936,7 +953,7 @@ class TheaterManager:
             f"Story bible: {json.dumps(state['bible'], ensure_ascii=False)}\n"
             f"Current story summary: {state.get('story_summary')}\nRecent scenes: {json.dumps(prior, ensure_ascii=False)}\n"
             f"Write every natural-language value only in {language_name}; do not switch to English. "
-            f"Create scene {number} with {max(12, words - 25)}-{max(12, words + 25)} narration words. "
+            f"Create scene {number} with {request_minimum}-{request_maximum} narration words. "
             "It must obey every premise_contract item and continuity rule, follow causally, introduce a new meaningful "
             "development, and remain open-ended. Keep the JSON compact and do not add fields. "
             f"Avoid these prior asset fingerprints: {used_hashes}. Return "
@@ -956,7 +973,6 @@ class TheaterManager:
         if any(not str(scene.get(key, "")).strip() for key in required):
             raise TheaterError(f"The local writer's scene {number} is missing required story fields.")
         scene = await self._verify_scene(state, scene)
-        scene = await self._prepare_narration(state, scene)
         fingerprint_text = f"{scene['beat']}|{scene['visual_action']}|{scene['camera']}".lower()
         scene["asset_fingerprint"] = hashlib.sha256(fingerprint_text.encode("utf-8")).hexdigest()[:16]
         if scene["asset_fingerprint"] in {s.get("asset_fingerprint") for s in state.get("planned", [])}:
@@ -964,12 +980,14 @@ class TheaterManager:
             scene["asset_fingerprint"] = hashlib.sha256((fingerprint_text + str(number)).encode()).hexdigest()[:16]
         state["story_summary"] = str(value.get("story_summary") or state.get("story_summary"))
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
+        state["metrics"]["planner_elapsed_seconds"] = metrics["elapsed_seconds"]
+        state["metrics"]["planner_prompt_tokens"] = metrics["prompt_tokens"]
         return scene
 
     async def _planner_loop(self, state: dict[str, Any], queue: asyncio.Queue[dict[str, Any]]) -> None:
         while True:
-            # Keep two complete scene plans ahead so the RTX does not wait for the
-            # CPU writer after finishing a raw clip.
+            # Keep two source-language plans waiting for the translation worker.
+            # A separate bounded ready queue limits total look-ahead downstream.
             while queue.qsize() >= 2:
                 await asyncio.sleep(0.5)
             number = len(state.get("planned", [])) + 1
@@ -980,7 +998,6 @@ class TheaterManager:
                     scene = dict(self._scene_object(state["bootstrap_scene"], "saved bootstrap"))
                     scene["number"] = 1
                     scene = await self._verify_scene(state, scene)
-                    scene = await self._prepare_narration(state, scene)
                     text = f"{scene.get('beat')}|{scene.get('visual_action')}|{scene.get('camera')}".lower()
                     scene["asset_fingerprint"] = hashlib.sha256(text.encode()).hexdigest()[:16]
                     state.pop("bootstrap_scene", None)
@@ -1007,9 +1024,41 @@ class TheaterManager:
                     await queue.put({"_error": f"The local writer could not structure scene {number}: {last_error}"})
                     return
             state.setdefault("planned", []).append(scene)
-            state["message"] = "The local model planned the next scene; the CPU writer is staying ahead."
+            state.setdefault("metrics", {})["source_plan_queue"] = queue.qsize() + 1
+            state["message"] = "The local model planned the next scene; translation can run beside the following plan."
             self._save(state)
             await queue.put(scene)
+
+    async def _translation_loop(
+        self, state: dict[str, Any], source_queue: asyncio.Queue[dict[str, Any]],
+        ready_queue: asyncio.Queue[dict[str, Any]], planner_task: asyncio.Task[None],
+    ) -> None:
+        """Prepare narration while the other Gemma slot plans the next scene."""
+        while True:
+            scene = await self._next_planned_scene(source_queue, planner_task)
+            try:
+                if scene.get("_error"):
+                    await ready_queue.put(scene)
+                    return
+                prepared = await self._prepare_narration(state, scene)
+                state["metrics"].update({
+                    "parallel_translation": bool(self.translation_language(state["config"])),
+                    "source_plan_queue": source_queue.qsize(),
+                    "translated_scene_queue": ready_queue.qsize() + 1,
+                })
+                state["message"] = (
+                    f"Scene {prepared['number']} is translation-ready while Gemma continues planning ahead."
+                )
+                self._save(state)
+                await ready_queue.put(prepared)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.exception("Local writer scene %s translation failed", scene.get("number"))
+                await ready_queue.put({"_error": str(exc)})
+                return
+            finally:
+                source_queue.task_done()
 
     @staticmethod
     async def _next_planned_scene(
@@ -1033,6 +1082,22 @@ class TheaterManager:
         if error:
             raise TheaterError(f"The local story planner crashed: {error}") from error
         raise TheaterError("The local story planner stopped before it supplied another scene.")
+
+    @classmethod
+    def _narration_is_prepared(cls, config: dict[str, Any], scene: dict[str, Any]) -> bool:
+        """Identify render-ready saved plans without repeating translation after resume."""
+        pairs = scene.get("narration_sentences")
+        if not isinstance(pairs, list) or not pairs:
+            return False
+        if any(not str(pair.get("original", "")).strip() for pair in pairs if isinstance(pair, dict)):
+            return False
+        if any(not isinstance(pair, dict) for pair in pairs):
+            return False
+        if not cls.translation_language(config):
+            return True
+        return bool(str(scene.get("translated_title", "")).strip()) and all(
+            str(pair.get("translation", "")).strip() for pair in pairs
+        )
 
     def _visual_prompt(self, state: dict[str, Any], scene: dict[str, Any]) -> str:
         bible = state["bible"]
@@ -1269,9 +1334,15 @@ class TheaterManager:
                 queue.task_done()
 
     async def _run(self, state: dict[str, Any]) -> None:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
+        # A stopped session may contain the normal three queued scenes plus the
+        # scene that was rendering when cancellation arrived. Size resume queues
+        # for that finite saved set so restoration cannot block before workers start.
+        resume_capacity = max(3, len(state.get("planned", [])) + 1)
+        source_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=resume_capacity)
+        ready_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=resume_capacity)
         assembly_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
         planner_task: asyncio.Task[None] | None = None
+        translation_task: asyncio.Task[None] | None = None
         assembly_task: asyncio.Task[None] | None = None
         try:
             state.update(status="starting", message="Loading the CPU writer, neural voice, and offline sources...")
@@ -1310,8 +1381,12 @@ class TheaterManager:
             produced_numbers = {int(item["number"]) for item in state.get("segments", [])}
             for saved_scene in state.get("planned", []):
                 if int(saved_scene["number"]) not in produced_numbers:
-                    await queue.put(saved_scene)
-            planner_task = asyncio.create_task(self._planner_loop(state, queue))
+                    target_queue = ready_queue if self._narration_is_prepared(state["config"], saved_scene) else source_queue
+                    await target_queue.put(saved_scene)
+            planner_task = asyncio.create_task(self._planner_loop(state, source_queue))
+            translation_task = asyncio.create_task(
+                self._translation_loop(state, source_queue, ready_queue, planner_task)
+            )
             assembly_task = asyncio.create_task(self._assembly_loop(state, assembly_queue))
             while True:
                 if assembly_task.done():
@@ -1319,7 +1394,7 @@ class TheaterManager:
                     if error:
                         raise TheaterError(f"The scene assembly worker failed: {error}") from error
                     raise TheaterError("The scene assembly worker stopped unexpectedly.")
-                scene = await self._next_planned_scene(queue, planner_task)
+                scene = await self._next_planned_scene(ready_queue, translation_task)
                 if scene.get("_error"):
                     raise TheaterError(scene["_error"])
                 if any(int(item["number"]) == int(scene["number"]) for item in state.get("segments", [])):
@@ -1332,16 +1407,22 @@ class TheaterManager:
                     raise TheaterError("The scene assembly worker stopped unexpectedly.")
                 await assembly_queue.put(work_item)
         except asyncio.CancelledError:
-            for child in (planner_task, assembly_task):
+            for child in (planner_task, translation_task, assembly_task):
                 if child:
                     child.cancel()
-            await asyncio.gather(*(child for child in (planner_task, assembly_task) if child), return_exceptions=True)
+            await asyncio.gather(
+                *(child for child in (planner_task, translation_task, assembly_task) if child),
+                return_exceptions=True,
+            )
             raise
         except Exception as exc:
-            for child in (planner_task, assembly_task):
+            for child in (planner_task, translation_task, assembly_task):
                 if child:
                     child.cancel()
-            await asyncio.gather(*(child for child in (planner_task, assembly_task) if child), return_exceptions=True)
+            await asyncio.gather(
+                *(child for child in (planner_task, translation_task, assembly_task) if child),
+                return_exceptions=True,
+            )
             LOGGER.exception("Theater session %s failed", state["id"])
             state["status"] = "failed"
             state["message"] = str(exc)

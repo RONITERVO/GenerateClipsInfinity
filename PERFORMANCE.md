@@ -22,7 +22,7 @@ The current configuration favors long-term stability on a 12 GB GPU over maximum
 
 During the reference bilingual session, the system produced about **67 seconds of playable movie every 60 seconds of wall time**. This is approximately **1.12× real time**. It is enough to maintain an endless stream once the initial buffer exists, but it is not a large safety margin.
 
-The present steady-state bottleneck is **Gemma story planning plus sentence translation**, not video rendering, speech synthesis, storage, or total available memory. GPU utilization reaches 100% during sampling but falls while the application waits for the next structured bilingual scene. That idle interval is expected under the current CPU-planning architecture.
+The captured steady-state bottleneck was **Gemma story planning plus sentence translation**, not video rendering, speech synthesis, storage, or total available memory. GPU utilization reached 100% during sampling but fell while the application waited for the next structured bilingual scene. The implementation now overlaps source planning and translation through two bounded Gemma slots; the baseline below predates that change and must not be presented as its measured result.
 
 ## Reference system
 
@@ -46,7 +46,7 @@ PyTorch flash, memory-efficient, and math scaled-dot-product attention backends 
 
 ## Measured workload
 
-The active Theater session used these settings:
+The active Theater session used these settings. It was captured before two-slot parallel translation and therefore remains a comparison baseline:
 
 | Setting | Value |
 | --- | --- |
@@ -129,12 +129,12 @@ The code deliberately separates four kinds of work:
 
 | Worker | Main resource | Current concurrency behavior |
 | --- | --- | --- |
-| Story planner and translator | CPU and RAM | Maintains a bounded queue of upcoming structured scenes |
+| Story planner and translator | CPU and RAM | Separate bounded workers use up to two Gemma slots: translate scene N while planning N+1 |
 | Supertonic | CPU and RAM | Starts speech generation at the same time as Wan |
 | Wan/ComfyUI | GPU, VRAM, some CPU | One serialized workflow at a time |
 | FFmpeg assembler | CPU | Processes the completed scene while the next raw clip can render |
 
-The planner queue and assembly queue are each bounded to prevent unlimited memory growth. The application also serializes ComfyUI submissions through a workflow lock, avoiding two Wan jobs competing for 12 GB of VRAM.
+The source-plan, translated-scene, and assembly queues are each bounded to prevent unlimited memory growth. The application also serializes ComfyUI submissions through a workflow lock, avoiding two Wan jobs competing for 12 GB of VRAM.
 
 Important source locations:
 
@@ -142,11 +142,21 @@ Important source locations:
 - `StoryRuntime`, `SupertonicRuntime`, and `TheaterManager` in [`theater_pipeline.py`](theater_pipeline.py);
 - browser-side buffer calculation and telemetry in [`static/theater.html`](static/theater.html).
 
+### Parallel translation groundwork
+
+Cinema preview now defaults to 80–110 total spoken words per clip. In bilingual mode the 2.1× speech reservation converts this to approximately 39–52 source words, leaving room for the translated speech inside the same total budget. Planning prompts are clamped to the configured limits rather than expanding beyond them with the older ±25-word range.
+
+The planner produces a source-language scene into a bounded queue. A second worker validates its sentence-aligned translation and places only render-ready scenes into another bounded queue. Meanwhile the planner can use the other llama.cpp slot for the next scene. Saved source plans and translated plans remain distinguishable, so interruption recovery does not repeat finished translations or send incomplete bilingual narration to TTS.
+
+This is groundwork, not a throughput claim. Two simultaneous CPU generations may reduce each request's individual token rate while improving combined throughput and GPU feed continuity. Benchmark at least ten completed scenes and compare end-to-end completion timestamps, not just tokens per second.
+
+The server allocates 32K context across two slots, preserving the earlier 16K ceiling per request. The planner still carries the story bible, rolling story summary, ten recent scene descriptors, and bounded grounding material because continuity may require them. `planner_prompt_tokens`, `translation_prompt_tokens`, stage elapsed time, and queue-depth metrics are saved so future work can identify context-growth slowdown before shortening continuity state. Prefer measured summary compaction over arbitrary truncation.
+
 ## Current deliberate tradeoffs
 
 ### CPU-only Gemma
 
-Gemma runs with `-ngl 0`, eight CPU threads, a 16K context, one parallel request slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping it off the GPU allows planning to overlap Wan rendering. Moving it to the GPU would make each LLM request faster in isolation but would force model swapping or serialize it with video generation, so the total pipeline could become slower.
+Gemma runs with `-ngl 0`, eight CPU threads, two parallel request slots, a 32K shared context allocation that preserves 16K per slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping it off the GPU allows planning and translation to overlap Wan rendering. Moving it to the GPU would make each LLM request faster in isolation but would force model swapping or serialize it with video generation, so the total pipeline could become slower.
 
 ### CPU-only Supertonic
 
@@ -183,11 +193,11 @@ For optimization decisions, use completed-segment timestamps over at least ten s
 
 The following items are proposals, not completed optimizations. Change one variable at a time and use the validation procedure below.
 
-### Priority 1: Gemma thread and CPU-affinity sweep
+### Priority 1: Validate Gemma parallel throughput, threads, and CPU affinity
 
-**Why:** Planning and translation are the current bottleneck.
+**Why:** Planning and translation were the measured bottleneck, and two-slot overlap changes CPU contention and per-request decoding speed.
 
-Test eight, ten, and twelve Gemma threads. Separately test leaving affinity unrestricted versus pinning Gemma to one Ryzen CCD. Cross-CCD scheduling can increase cache traffic, but Windows may already make better scheduling decisions than a fixed mask.
+Compare the former one-slot baseline with two slots over at least ten scenes, then test eight, ten, and twelve Gemma threads. Separately test leaving affinity unrestricted versus pinning Gemma to one Ryzen CCD. Cross-CCD scheduling can increase cache traffic, but Windows may already make better scheduling decisions than a fixed mask.
 
 **Success condition:** lower complete planner-cycle time without increasing Wan, TTS, or FFmpeg times enough to reduce completed-scene throughput.
 
@@ -234,7 +244,6 @@ Benchmark `--preview-method none` against `auto`.
 
 These require code or model-architecture changes and should not be presented as quick tuning:
 
-- plan the next source scene and translate the current scene concurrently through multiple llama slots;
 - run a separate small translation runtime so story planning does not wait for translation;
 - request story and aligned translation in one Gemma completion, accepting a larger validation and repair burden;
 - dynamically move Gemma between CPU and GPU during Wan-idle periods, accepting model-transfer cost and more complex scheduling;
