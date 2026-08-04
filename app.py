@@ -752,6 +752,7 @@ async def api_theater_live_directive(request: web.Request) -> web.Response:
         raw = await request.json()
         return web.json_response(THEATER.add_live_directive(
             request.match_info["session_id"], raw.get("text", ""), str(raw.get("scope", "next_scene")),
+            str(raw.get("delivery", "after_buffer")),
         ))
     except (TheaterError, ValueError, TypeError, json.JSONDecodeError) as exc:
         return web.json_response({"error": str(exc)}, status=400)

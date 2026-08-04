@@ -1027,6 +1027,8 @@ class PromptTests(unittest.TestCase):
             ],
             "live_directives": [{
                 "id": "storm", "scope": "next_scene", "status": "applied", "applied_scene": 2,
+            }, {
+                "id": "rain", "scope": "persistent", "status": "active", "first_applied_scene": 2,
             }],
             "metrics": {
                 "last_context_compaction_scene": 3, "context_compaction_count": 2,
@@ -1043,14 +1045,19 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("context_compaction_count", state["metrics"])
         self.assertNotIn("planner_repair_reason", state["metrics"])
         self.assertEqual(state["live_directives"][0]["status"], "pending")
+        self.assertNotIn("first_applied_scene", state["live_directives"][1])
         self.assertEqual(state["metrics"]["last_live_steering_scene"], 2)
 
-    def test_live_directive_wakes_running_pipeline_and_persistent_rule_is_removable(self):
+    def test_delayed_directive_preserves_buffer_while_fast_directive_wakes_pipeline(self):
         async def exercise(root: Path):
             manager = TheaterManager.__new__(TheaterManager)
             manager.root = root
             (root / "session" / "logs").mkdir(parents=True)
-            state = {"id": "session", "planned": [], "segments": [], "metrics": {}, "live_directives": []}
+            state = {
+                "id": "session", "segments": [], "live_directives": [],
+                "planned": [{"number": 1}, {"number": 2}, {"number": 3}],
+                "metrics": {"planner_cycle_started_at": time.time()},
+            }
             task = asyncio.create_task(asyncio.sleep(60))
             manager.sessions = {"session": state}
             manager.tasks = {"session": task}
@@ -1058,22 +1065,42 @@ class PromptTests(unittest.TestCase):
             manager._save = lambda _state: None
             try:
                 manager.add_live_directive("session", "  Keep the lighthouse visible.  ", "persistent")
-                added = dict(state["live_directives"][0])
-                woke_for_add = manager.steering_events["session"].is_set()
-                manager.steering_events["session"].clear()
-                manager.remove_live_directive("session", added["id"])
-                return added, woke_for_add, manager.steering_events["session"].is_set(), state
+                delayed = dict(state["live_directives"][0])
+                woke_for_delayed = manager.steering_events["session"].is_set()
+                manager.remove_live_directive("session", delayed["id"])
+                woke_for_delayed_remove = manager.steering_events["session"].is_set()
+                manager.add_live_directive(
+                    "session", "Open the red door now.", "next_scene", "next_unrendered",
+                )
+                fast = dict(state["live_directives"][1])
+                return delayed, fast, woke_for_delayed, woke_for_delayed_remove, manager.steering_events["session"].is_set(), state
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
         with tempfile.TemporaryDirectory() as directory:
-            added, woke_for_add, woke_for_remove, state = asyncio.run(exercise(Path(directory)))
-        self.assertEqual(added["text"], "Keep the lighthouse visible.")
-        self.assertEqual(added["status"], "active")
-        self.assertTrue(woke_for_add)
-        self.assertTrue(woke_for_remove)
+            delayed, fast, woke_for_delayed, woke_for_remove, woke_for_fast, state = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(delayed["text"], "Keep the lighthouse visible.")
+        self.assertEqual(delayed["status"], "active")
+        self.assertEqual(delayed["delivery"], "after_buffer")
+        self.assertEqual(delayed["activation_scene"], 5)
+        self.assertFalse(woke_for_delayed)
+        self.assertFalse(woke_for_remove)
+        self.assertEqual(fast["delivery"], "next_unrendered")
+        self.assertTrue(woke_for_fast)
         self.assertEqual(state["live_directives"][0]["status"], "removed")
+
+    def test_delayed_direction_is_hidden_from_gemma_until_reserved_scene(self):
+        state = {"live_directives": [{
+            "id": "later", "scope": "next_scene", "status": "pending", "delivery": "after_buffer",
+            "activation_scene": 7, "text": "The comet becomes visible.",
+        }]}
+        early_prompt, early_ids = TheaterManager._steering_context(state, 6)
+        ready_prompt, ready_ids = TheaterManager._steering_context(state, 7)
+        self.assertEqual(early_prompt, "")
+        self.assertEqual(early_ids, [])
+        self.assertIn("The comet becomes visible", ready_prompt)
+        self.assertEqual(ready_ids, ["later"])
 
     def test_live_word_target_stays_inside_custom_budget(self):
         manager = TheaterManager.__new__(TheaterManager)

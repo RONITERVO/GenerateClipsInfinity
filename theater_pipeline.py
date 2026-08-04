@@ -769,10 +769,11 @@ class TheaterManager:
         metrics.update(snapshot.get("context_compaction_metrics") or {})
 
     @staticmethod
-    def _steering_context(state: dict[str, Any]) -> tuple[str, list[str]]:
+    def _steering_context(state: dict[str, Any], number: int) -> tuple[str, list[str]]:
         selected = [
             item for item in state.get("live_directives", [])
             if item.get("status") in {"pending", "active"}
+            and number >= int(item.get("activation_scene") or 1)
         ]
         if not selected:
             return "", []
@@ -804,7 +805,9 @@ class TheaterManager:
         keep_terminal = max(0, self.LIVE_DIRECTIVE_HISTORY_LIMIT - len(live))
         state["live_directives"] = terminal[-keep_terminal:] + live if keep_terminal else live
 
-    def add_live_directive(self, session_id: str, text: str, scope: str = "next_scene") -> dict[str, Any]:
+    def add_live_directive(
+        self, session_id: str, text: str, scope: str = "next_scene", delivery: str = "after_buffer",
+    ) -> dict[str, Any]:
         state = self.sessions.get(session_id)
         if not state:
             raise TheaterError("Theater session not found.")
@@ -815,6 +818,8 @@ class TheaterManager:
             raise TheaterError(f"Live directions can contain at most {self.LIVE_DIRECTIVE_MAX_CHARS} characters.")
         if scope not in {"next_scene", "persistent"}:
             raise TheaterError("Choose a one-scene event or persistent world rule.")
+        if delivery not in {"after_buffer", "next_unrendered"}:
+            raise TheaterError("Choose delayed steering or next-unrendered steering.")
         active_count = sum(
             item.get("status") in {"pending", "active"} for item in state.get("live_directives", [])
         )
@@ -822,21 +827,32 @@ class TheaterManager:
             raise TheaterError(
                 f"Remove or let an event finish before adding more than {self.LIVE_DIRECTIVE_ACTIVE_LIMIT} live directions."
             )
+        planned_through = max((int(item["number"]) for item in state.get("planned", [])), default=0)
+        planning_in_flight = bool(state.get("metrics", {}).get("planner_cycle_started_at"))
+        bootstrap_in_flight = not planned_through and bool(state.get("bootstrap_scene"))
+        reserved_through = planned_through + (1 if planning_in_flight else 0)
+        if bootstrap_in_flight:
+            reserved_through = max(reserved_through, 1)
+        activation_scene = reserved_through + 1 if delivery == "after_buffer" else 1
         directive = {
             "id": secrets.token_hex(6), "text": cleaned, "scope": scope,
             "status": "pending" if scope == "next_scene" else "active",
-            "created_at": time.time(),
+            "delivery": delivery, "activation_scene": activation_scene, "created_at": time.time(),
         }
         state.setdefault("live_directives", []).append(directive)
         self._trim_live_directives(state)
         self._log_live_directive(state, {"action": "added", **directive})
         task = self.tasks.get(session_id)
-        if task and not task.done():
+        if task and not task.done() and delivery == "next_unrendered":
             self.steering_events.setdefault(session_id, asyncio.Event()).set()
             state["message"] = "Live direction queued; speculative text will be replaced before the next render."
-        else:
+        elif (not task or task.done()) and delivery == "next_unrendered":
             self._rollback_speculative_plans(state, {int(item["number"]) for item in state.get("segments", [])})
             state["message"] = "Live direction saved; it will affect the next scene when this theater resumes."
+        else:
+            state["message"] = (
+                f"Live direction queued for scene {activation_scene}; all existing planned work will finish first."
+            )
         self._save(state)
         return state
 
@@ -852,11 +868,14 @@ class TheaterManager:
         directive.update(status="removed", removed_at=time.time())
         self._log_live_directive(state, {"action": "removed", **directive})
         task = self.tasks.get(session_id)
-        if task and not task.done():
-            self.steering_events.setdefault(session_id, asyncio.Event()).set()
+        if directive.get("delivery") == "next_unrendered":
+            if task and not task.done():
+                self.steering_events.setdefault(session_id, asyncio.Event()).set()
+            else:
+                self._rollback_speculative_plans(state, {int(item["number"]) for item in state.get("segments", [])})
+            state["message"] = "The world rule was removed from future unrendered scenes."
         else:
-            self._rollback_speculative_plans(state, {int(item["number"]) for item in state.get("segments", [])})
-        state["message"] = "The world rule was removed for future unrendered scenes."
+            state["message"] = "The delayed rule was removed; existing planned scenes remain unchanged."
         self._save(state)
         return state
 
@@ -866,9 +885,14 @@ class TheaterManager:
             return
         applied_at = time.time()
         for item in state.get("live_directives", []):
-            if item.get("id") in directive_ids and item.get("scope") == "next_scene" and item.get("status") == "pending":
+            if item.get("id") not in directive_ids:
+                continue
+            if item.get("scope") == "next_scene" and item.get("status") == "pending":
                 item.update(status="applied", applied_scene=int(scene["number"]), applied_at=applied_at)
                 self._log_live_directive(state, {"action": "applied", **item})
+            elif item.get("scope") == "persistent" and not item.get("first_applied_scene"):
+                item.update(first_applied_scene=int(scene["number"]), activated_at=applied_at)
+                self._log_live_directive(state, {"action": "activated", **item})
 
     def _rollback_speculative_plans(self, state: dict[str, Any], protected_numbers: set[int]) -> int:
         """Discard only an unrendered suffix with a known causal-state checkpoint."""
@@ -889,6 +913,9 @@ class TheaterManager:
                 item["status"] = "pending"
                 item.pop("applied_scene", None)
                 item.pop("applied_at", None)
+            if int(item.get("first_applied_scene") or 0) in discarded_numbers:
+                item.pop("first_applied_scene", None)
+                item.pop("activated_at", None)
         metrics = state.setdefault("metrics", {})
         metrics["live_steering_revision"] = int(metrics.get("live_steering_revision") or 0) + 1
         metrics["live_steering_discarded_plans"] = int(metrics.get("live_steering_discarded_plans") or 0) + len(discarded)
@@ -1472,7 +1499,7 @@ class TheaterManager:
 
     async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
         planning_context_before = self._planning_context_snapshot(state)
-        steering_prompt, live_directive_ids = self._steering_context(state)
+        steering_prompt, live_directive_ids = self._steering_context(state, number)
         words = self._target_words(state)
         request_minimum, request_maximum = self._narration_request_limits(state)
         sentence_count = max(3, min(10, math.ceil(words / 7)))
