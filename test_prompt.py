@@ -53,9 +53,9 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(MovieManager._atempo(8.0), "atempo=2.000000,atempo=2.000000,atempo=2.000000")
         self.assertEqual(MovieManager._atempo(0.25), "atempo=0.500000,atempo=0.500000")
 
-    def test_theater_defaults_are_offline_realtime_safe(self):
+    def test_theater_defaults_to_tested_cinema_preview(self):
         config = validate_theater_payload({"prompt": "Teach astronomy through an adventure."})
-        self.assertEqual(config["quality"], "realtime")
+        self.assertEqual(config["quality"], "cinema")
         self.assertEqual(config["mode"], "edutainment")
         self.assertEqual(config["audience"], "family")
         self.assertEqual(config["voice"], "M1")

@@ -623,7 +623,7 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Write a story or learning idea first.")
     if len(prompt) > 1200:
         raise ValueError("The theater prompt is too long (maximum 1,200 characters).")
-    quality = str(raw.get("quality", "realtime"))
+    quality = str(raw.get("quality", "cinema"))
     mode = str(raw.get("mode", "edutainment"))
     audience = str(raw.get("audience", "family"))
     if quality not in TheaterManager.QUALITY:
