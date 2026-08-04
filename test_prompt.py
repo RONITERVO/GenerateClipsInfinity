@@ -5,8 +5,9 @@ import time
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
-from app import build_prompt, validate_movie_payload, validate_payload, validate_theater_payload
+from app import _is_local_exit_request, build_prompt, validate_movie_payload, validate_payload, validate_theater_payload
 from movie_pipeline import MovieManager
 from theater_pipeline import (
     GpuReleaseError, StoryRuntime, SupertonicRuntime, TheaterError, TheaterManager, split_narration_sentences,
@@ -15,6 +16,75 @@ from theater_pipeline import (
 
 
 class PromptTests(unittest.TestCase):
+    def test_exit_endpoint_requires_loopback_and_explicit_same_origin_header(self):
+        class Request:
+            def __init__(self, remote, header):
+                self.remote = remote
+                self.headers = {"X-Wan-Local-Exit": header} if header else {}
+
+        self.assertTrue(_is_local_exit_request(Request("127.0.0.1", "release-owned-resources")))
+        self.assertTrue(_is_local_exit_request(Request("::1", "release-owned-resources")))
+        self.assertFalse(_is_local_exit_request(Request("127.0.0.1", "")))
+        self.assertFalse(_is_local_exit_request(Request("192.168.1.20", "release-owned-resources")))
+
+    def test_theater_retries_one_externally_interrupted_ffmpeg_run(self):
+        class Process:
+            def __init__(self, code):
+                self.code = code
+            async def wait(self):
+                return self.code
+
+        async def exercise(log_path):
+            manager = TheaterManager.__new__(TheaterManager)
+            processes = [Process(0xC000013A), Process(0)]
+            with patch(
+                "theater_pipeline.asyncio.create_subprocess_exec", side_effect=processes,
+            ) as create:
+                await manager._run_ffmpeg(["ffmpeg", "-version"], log_path)
+                return create.call_count
+
+        with tempfile.TemporaryDirectory() as directory:
+            calls = asyncio.run(exercise(Path(directory) / "ffmpeg.log"))
+        self.assertEqual(calls, 2)
+
+    def test_theater_does_not_retry_a_genuine_ffmpeg_error(self):
+        class Process:
+            async def wait(self):
+                return 1
+
+        async def exercise(log_path):
+            manager = TheaterManager.__new__(TheaterManager)
+            with patch(
+                "theater_pipeline.asyncio.create_subprocess_exec", return_value=Process(),
+            ) as create:
+                with self.assertRaisesRegex(TheaterError, "exit 1"):
+                    await manager._run_ffmpeg(["ffmpeg", "-version"], log_path)
+                return create.call_count
+
+        with tempfile.TemporaryDirectory() as directory:
+            calls = asyncio.run(exercise(Path(directory) / "ffmpeg.log"))
+        self.assertEqual(calls, 1)
+
+    def test_movie_shutdown_marks_active_work_resumable(self):
+        async def exercise():
+            manager = MovieManager.__new__(MovieManager)
+            state = {"id": "movie", "status": "rendering"}
+            manager.jobs = {"movie": state}
+            manager.tasks = {"movie": asyncio.create_task(asyncio.sleep(60))}
+            manager._update = lambda value, **changes: value.update(changes)
+            stopped = []
+            class Planner:
+                async def stop(self):
+                    stopped.append(True)
+            manager.planner = Planner()
+            await manager.shutdown()
+            return state, stopped
+
+        state, stopped = asyncio.run(exercise())
+        self.assertEqual(state["status"], "interrupted")
+        self.assertIn("kept", state["message"])
+        self.assertTrue(stopped)
+
     def test_blueprint_graph_and_output_node(self):
         config = validate_payload(
             {

@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from aiohttp import ClientSession, ClientTimeout
 
+from process_utils import terminate_process_tree
+
 
 LOGGER = logging.getLogger("wan-video-ui.theater")
 THEATER_VERSION = 2
@@ -236,12 +238,7 @@ class StoryRuntime:
         selected = profile or self.profile
         process = self.processes[selected]
         if process and process.poll() is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=10)
-            except asyncio.TimeoutError:
-                process.kill()
-                await asyncio.to_thread(process.wait)
+            await terminate_process_tree(process)
         self.processes[selected] = None
         self.pid_files[selected].unlink(missing_ok=True)
         if self.profile == selected:
@@ -411,11 +408,7 @@ class SupertonicRuntime:
 
     async def stop(self) -> None:
         if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(asyncio.to_thread(self.process.wait), timeout=10)
-            except asyncio.TimeoutError:
-                self.process.kill()
+            await terminate_process_tree(self.process)
         self.process = None
         self.pid_file.unlink(missing_ok=True)
 
@@ -542,11 +535,7 @@ class KiwixRuntime:
 
     async def stop(self) -> None:
         if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(asyncio.to_thread(self.process.wait), timeout=10)
-            except asyncio.TimeoutError:
-                self.process.kill()
+            await terminate_process_tree(self.process)
         self.process = None
         self.pid_file.unlink(missing_ok=True)
 
@@ -561,6 +550,7 @@ class TheaterManager:
     DEFAULT_TTS_SPEED = 1.05
     MIN_TTS_SPEED = 0.96
     MAX_TTS_SPEED = 1.05
+    FFMPEG_INTERRUPTED_EXIT_CODES = {-15, 255, 0xC000013A}
     DEFAULT_MONOLINGUAL_SECONDS_PER_WORD = 0.32
     DEFAULT_BILINGUAL_SECONDS_PER_WORD = 0.53
     LANGUAGE_NAMES = {
@@ -1594,20 +1584,25 @@ class TheaterManager:
         return float(out.decode().strip())
 
     async def _run_ffmpeg(self, args: list[str], log_path: Path) -> None:
-        with log_path.open("ab") as log:
-            process = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log)
-            try:
-                code = await process.wait()
-            except asyncio.CancelledError:
-                process.terminate()
+        for attempt in range(1, 3):
+            with log_path.open("ab") as log:
+                process = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log)
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
-                raise
-        if code:
-            raise TheaterError(f"FFmpeg failed while synchronizing the theater (exit {code}).")
+                    code = await process.wait()
+                except asyncio.CancelledError:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        await process.wait()
+                    raise
+            if code == 0:
+                return
+            if code not in self.FFMPEG_INTERRUPTED_EXIT_CODES or attempt == 2:
+                raise TheaterError(f"FFmpeg failed while synchronizing the theater (exit {code}).")
+            LOGGER.warning("FFmpeg was externally interrupted (exit %s); retrying once.", code)
+            await asyncio.sleep(0.25)
 
     @classmethod
     def _visual_sync_filter(

@@ -16,6 +16,7 @@ from typing import Any
 from aiohttp import ClientSession, ClientTimeout, web
 
 from movie_pipeline import MovieError, MovieManager
+from process_utils import terminate_process_tree
 from theater_pipeline import SupertonicRuntime, TheaterError, TheaterManager
 
 
@@ -55,6 +56,8 @@ DEFAULT_NEGATIVE = (
     "still image, washed out, worst quality, low quality, JPEG artifacts, distorted "
     "hands, malformed fingers, deformed face, fused limbs, cluttered background, NSFW"
 )
+
+RUNTIME_STATE = web.AppKey("runtime_state", dict)
 
 
 def build_prompt(config: dict[str, Any]) -> dict[str, Any]:
@@ -246,6 +249,12 @@ class ComfyController:
     async def close(self) -> None:
         if self.session:
             await self.session.close()
+            self.session = None
+
+    async def stop_owned_process(self) -> None:
+        """Unload ComfyUI and stop it only when this app launched the process."""
+        await terminate_process_tree(self.process)
+        self.process = None
 
     async def stats(self) -> dict[str, Any] | None:
         assert self.session
@@ -760,22 +769,84 @@ async def api_theater_voice_preview(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
 
-async def on_startup(_: web.Application) -> None:
+def _is_local_exit_request(request: web.Request) -> bool:
+    remote = request.remote or ""
+    same_machine = remote in {"127.0.0.1", "::1"} or remote.startswith("::ffff:127.")
+    return same_machine and request.headers.get("X-Wan-Local-Exit") == "release-owned-resources"
+
+
+async def _release_owned_resources(app: web.Application) -> None:
+    """Archive active work, release accelerators, and terminate only owned helpers."""
+    runtime = app[RUNTIME_STATE]
+
+    async def cancel_background_start() -> None:
+        task = runtime.get("comfy_start_task")
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    steps = (
+        ("cancel background ComfyUI startup", cancel_background_start),
+        ("interrupt ComfyUI work", CONTROLLER.interrupt),
+        ("archive Theater work and stop Theater helpers", THEATER.shutdown),
+        ("archive movie work and stop the movie planner", MOVIES.shutdown),
+        ("unload ComfyUI models", CONTROLLER.free_models),
+        ("stop app-owned ComfyUI", CONTROLLER.stop_owned_process),
+    )
+    for description, action in steps:
+        try:
+            await action()
+        except Exception:
+            LOGGER.exception("One-click exit could not %s", description)
+    LOGGER.info("All reachable app-owned generation resources were released by the exit action")
+    runtime["shutdown_complete"] = True
+    runtime["shutdown_event"].set()
+
+
+async def api_shutdown(request: web.Request) -> web.Response:
+    if not _is_local_exit_request(request):
+        raise web.HTTPForbidden(text="Local exit authorization required")
+    runtime = request.app[RUNTIME_STATE]
+    task = runtime.get("resource_release_task")
+    if not task:
+        task = asyncio.create_task(
+            _release_owned_resources(request.app), name="release-owned-resources",
+        )
+        runtime["resource_release_task"] = task
+    return web.json_response(
+        {"status": "shutting_down", "message": "Archiving work and releasing RAM and VRAM."},
+        status=202,
+    )
+
+
+async def on_startup(app: web.Application) -> None:
     await CONTROLLER.open()
     MOVIES.load_existing()
     THEATER.load_existing()
     (APP_DIR / "wan-video-ui.pid").write_text(str(os.getpid()), encoding="utf-8")
-    asyncio.create_task(CONTROLLER.ensure_ready())
+    app[RUNTIME_STATE]["comfy_start_task"] = asyncio.create_task(
+        CONTROLLER.ensure_ready(), name="comfy-background-start",
+    )
 
 
-async def on_cleanup(_: web.Application) -> None:
-    await THEATER.shutdown()
+async def on_cleanup(app: web.Application) -> None:
+    task = app[RUNTIME_STATE].get("resource_release_task")
+    if task:
+        await task
+    else:
+        await _release_owned_resources(app)
     await CONTROLLER.close()
     (APP_DIR / "wan-video-ui.pid").unlink(missing_ok=True)
 
 
 def create_app() -> web.Application:
     app = web.Application(client_max_size=1024 * 1024)
+    app[RUNTIME_STATE] = {
+        "shutdown_event": asyncio.Event(),
+        "shutdown_complete": False,
+        "resource_release_task": None,
+        "comfy_start_task": None,
+    }
     app.router.add_get("/", index)
     app.router.add_get("/movie", movie_page)
     app.router.add_get("/theater", theater_page)
@@ -799,16 +870,33 @@ def create_app() -> web.Application:
     app.router.add_get("/api/theater/{session_id}", api_theater_status)
     app.router.add_post("/api/theater/{session_id}/stop", api_theater_stop)
     app.router.add_post("/api/theater/{session_id}/resume", api_theater_resume)
+    app.router.add_post("/api/shutdown", api_shutdown)
+    app.router.add_static("/static/", STATIC_DIR, show_index=False)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
+
+
+async def _serve() -> None:
+    app = create_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host=HOST, port=PORT)
+    await site.start()
+    try:
+        await app[RUNTIME_STATE]["shutdown_event"].wait()
+    finally:
+        await runner.cleanup()
 
 
 def main() -> None:
     if not COMFY_ROOT.exists():
         raise SystemExit(f"ComfyUI was not found at {COMFY_ROOT}")
     LOGGER.info("Starting Wan Video UI on http://%s:%s", HOST, PORT)
-    web.run_app(create_app(), host=HOST, port=PORT, print=None)
+    try:
+        asyncio.run(_serve())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
