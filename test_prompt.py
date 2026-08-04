@@ -8,7 +8,7 @@ from pathlib import Path
 from app import build_prompt, validate_movie_payload, validate_payload, validate_theater_payload
 from movie_pipeline import MovieManager
 from theater_pipeline import (
-    StoryRuntime, SupertonicRuntime, TheaterError, TheaterManager, split_narration_sentences,
+    GpuReleaseError, StoryRuntime, SupertonicRuntime, TheaterError, TheaterManager, split_narration_sentences,
     spoken_word_count,
 )
 
@@ -374,6 +374,24 @@ class PromptTests(unittest.TestCase):
         with self.assertRaisesRegex(TheaterError, "planner exploded"):
             asyncio.run(exercise())
 
+    def test_timed_scene_wait_does_not_leave_a_hidden_queue_consumer(self):
+        async def exercise():
+            queue = asyncio.Queue()
+            planner = asyncio.create_task(asyncio.sleep(10))
+            try:
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        TheaterManager._next_planned_scene(queue, planner), timeout=0.01,
+                    )
+                await queue.put({"number": 1})
+                await asyncio.sleep(0)
+                return queue.qsize()
+            finally:
+                planner.cancel()
+                await asyncio.gather(planner, return_exceptions=True)
+
+        self.assertEqual(asyncio.run(exercise()), 1)
+
     def test_single_scene_list_from_small_model_is_accepted(self):
         scene = {"number": 1, "title": "A scene"}
         self.assertIs(TheaterManager._scene_object([scene], "test"), scene)
@@ -416,6 +434,226 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(args[args.index("--parallel") + 1], "2")
             self.assertEqual(args[args.index("-c") + 1], "32768")
             self.assertEqual(runtime.sampling["top_k"], 64)
+
+    def test_cuda_writer_profile_uses_benchmarked_isolated_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "models").mkdir()
+            (root / "models" / "gemma-4-E4B-it-Q4_K_M.gguf").touch()
+            (root / "runtime").mkdir()
+            server = root / "runtime" / "llama-server.exe"
+            server.touch()
+            (root / "runtime" / "ggml-cuda.dll").touch()
+            runtime = StoryRuntime(root, root, root, root)
+            args = runtime._server_args(server, "gpu")
+            self.assertTrue(runtime.gpu_available)
+            self.assertEqual(args[args.index("--port") + 1], "18083")
+            self.assertEqual(args[args.index("-ngl") + 1], "99")
+            self.assertEqual(args[args.index("--parallel") + 1], "2")
+            self.assertEqual(args[args.index("-c") + 1], "32768")
+            self.assertEqual(args[args.index("-fa") + 1], "on")
+            self.assertEqual(args[args.index("-ctk") + 1], "f16")
+            self.assertEqual(args[args.index("-ctv") + 1], "f16")
+
+    def test_gpu_buffer_fill_is_bounded_and_translation_ready(self):
+        async def exercise():
+            manager = TheaterManager.__new__(TheaterManager)
+            manager._save = lambda _state: None
+
+            async def verify(_state, scene):
+                return scene
+
+            async def plan(_state, number, _recent):
+                return {"number": number, "title": f"Scene {number}"}
+
+            async def prepare(_state, scene):
+                scene["narration_sentences"] = [{"original": f"Words {scene['number']}."}]
+                return scene
+
+            manager._verify_scene = verify
+            manager._plan_next = plan
+            manager._prepare_narration = prepare
+            state = {
+                "id": "bounded", "config": {"language": "en", "translation_language": ""},
+                "planned": [], "segments": [], "metrics": {},
+                "bootstrap_scene": {
+                    "number": 1, "title": "Scene 1", "beat": "begin",
+                    "visual_action": "walk", "camera": "wide",
+                },
+            }
+            prepared = await asyncio.wait_for(manager._fill_story_buffer(state, 3), timeout=1)
+            return prepared, state
+
+        prepared, state = asyncio.run(exercise())
+        self.assertGreaterEqual(prepared, 3)
+        self.assertLessEqual(len(state["planned"]), 5)
+        self.assertTrue(all(
+            TheaterManager._narration_is_prepared(state["config"], scene)
+            for scene in state["planned"][:3]
+        ))
+
+    def test_gpu_buffer_burst_releases_writer_before_returning(self):
+        async def exercise(root: Path):
+            events = []
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            manager.GPU_BURST_TARGET = 3
+            manager._save = lambda _state: None
+
+            class Controller:
+                workflow_lock = asyncio.Lock()
+
+                async def wait_until_idle(self):
+                    events.append("idle")
+
+                async def free_models(self):
+                    events.append("free")
+
+            class Writer:
+                model_label = "Gemma"
+
+                async def start(self, _logs, profile="cpu"):
+                    events.append(f"start:{profile}")
+
+                async def stop(self, profile=None):
+                    events.append(f"stop:{profile}")
+
+                async def healthy(self, profile=None):
+                    return False
+
+                def activate(self, profile):
+                    events.append(f"activate:{profile}")
+
+            async def fill(_state, target, _excluded=None):
+                events.append(f"fill:{target}")
+                return target
+
+            manager.controller = Controller()
+            manager.writer = Writer()
+            manager._fill_story_buffer = fill
+            state = {
+                "id": "session", "config": {"language": "en", "translation_language": ""},
+                "bible": {"world": "test"}, "planned": [], "segments": [], "metrics": {},
+            }
+            await manager._prime_gpu_story_buffer(state)
+            return events, state
+
+        with tempfile.TemporaryDirectory() as directory:
+            events, state = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(events, [
+            "idle", "free", "start:gpu", "fill:3", "stop:gpu", "activate:cpu",
+        ])
+        self.assertFalse(state["metrics"]["gpu_burst_active"])
+        self.assertTrue(state["metrics"]["gpu_burst_completed"])
+
+    def test_gpu_buffer_burst_fails_closed_if_cuda_server_survives(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            manager.GPU_BURST_TARGET = 3
+            manager._save = lambda _state: None
+
+            class Controller:
+                workflow_lock = asyncio.Lock()
+                async def wait_until_idle(self): pass
+                async def free_models(self): pass
+
+            class Writer:
+                model_label = "Gemma"
+                async def start(self, _logs, profile="cpu"): pass
+                async def stop(self, profile=None): pass
+                async def healthy(self, profile=None): return True
+                def activate(self, profile): pass
+
+            manager.controller = Controller()
+            manager.writer = Writer()
+            manager._fill_story_buffer = lambda _state, _target, _excluded=None: asyncio.sleep(0, result=3)
+            state = {
+                "id": "session", "config": {"language": "en", "translation_language": ""},
+                "bible": {"world": "test"}, "planned": [], "segments": [], "metrics": {},
+            }
+            await manager._prime_gpu_story_buffer(state)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(GpuReleaseError, "still running"):
+                asyncio.run(exercise(Path(directory)))
+
+    def test_adaptive_gpu_refill_requires_an_empty_queue_and_measured_advantage(self):
+        manager = TheaterManager.__new__(TheaterManager)
+
+        class Writer:
+            gpu_available = True
+
+        manager.writer = Writer()
+        state = {
+            "config": {"language": "en", "translation_language": "es"},
+            "metrics": {
+                "translation_elapsed_ema": 40.0,
+                "translation_request_started_at": time.time() - 5.0,
+                "gpu_burst_total_seconds": 18.6,
+            },
+        }
+        source_queue = asyncio.Queue()
+        ready_queue = asyncio.Queue()
+        self.assertTrue(manager._should_refill_on_gpu(state, ready_queue, source_queue))
+        self.assertGreater(state["metrics"]["gpu_refill_predicted_cpu_wait"], 34)
+        ready_queue.put_nowait({"number": 4})
+        self.assertFalse(manager._should_refill_on_gpu(state, ready_queue, source_queue))
+        ready_queue.get_nowait()
+        state["metrics"]["translation_request_started_at"] = time.time() - 35.0
+        self.assertFalse(manager._should_refill_on_gpu(state, ready_queue, source_queue))
+
+    def test_gpu_refill_cycles_do_not_contaminate_cpu_wait_model(self):
+        async def exercise():
+            manager = TheaterManager.__new__(TheaterManager)
+            manager._save = lambda _state: None
+
+            class Writer:
+                profile = "gpu"
+
+            async def plan(_state, number, _recent):
+                return {"number": number, "title": f"Scene {number}"}
+
+            manager.writer = Writer()
+            manager._plan_next = plan
+            state = {"id": "ema", "planned": [], "metrics": {"planner_cycle_ema": 50.0}}
+            queue = asyncio.Queue(maxsize=3)
+            task = asyncio.create_task(manager._planner_loop(state, queue))
+            try:
+                await asyncio.wait_for(queue.get(), timeout=1)
+                return state["metrics"]
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        metrics = asyncio.run(exercise())
+        self.assertEqual(metrics["planner_cycle_ema"], 50.0)
+        self.assertIn("gpu_planner_cycle_seconds", metrics)
+
+    def test_restored_workers_exclude_rendered_but_unarchived_scene(self):
+        async def exercise():
+            manager = TheaterManager.__new__(TheaterManager)
+            manager._save = lambda _state: None
+            manager._plan_next = lambda *_args: asyncio.sleep(10)
+            manager._prepare_narration = lambda *_args: asyncio.sleep(10)
+            prepared = lambda number: {
+                "number": number, "title": f"Scene {number}",
+                "narration_sentences": [{"original": "Ready."}],
+            }
+            state = {
+                "id": "restore", "config": {"language": "en", "translation_language": ""},
+                "segments": [], "planned": [prepared(1), prepared(2), {"number": 3, "title": "Scene 3"}],
+                "metrics": {},
+            }
+            source, ready, planner, translator = manager._restore_story_workers(state, {1})
+            try:
+                return [item["number"] for item in list(ready._queue)], [item["number"] for item in list(source._queue)]
+            finally:
+                await manager._cancel_story_workers(planner, translator)
+
+        ready_numbers, source_numbers = asyncio.run(exercise())
+        self.assertEqual(ready_numbers, [2])
+        self.assertEqual(source_numbers, [3])
 
     def test_planning_overlaps_translation_through_bounded_queues(self):
         async def exercise():

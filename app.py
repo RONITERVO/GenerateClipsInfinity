@@ -33,6 +33,7 @@ COMFY_ROOT = _env_path("WAN_COMFY_ROOT", AI_ROOT / "ComfyUI")
 BONSAI_ROOT = _env_path("WAN_BONSAI_ROOT", LOCAL_AI_ROOT / "Bonsai27B")
 STORY_MODEL_ROOT = _env_path("WAN_GEMMA4_ROOT", LOCAL_AI_ROOT / "Gemma4E4B")
 LLAMA_RUNTIME_ROOT = _env_path("WAN_LLAMA_RUNTIME_ROOT", STORY_MODEL_ROOT)
+CUDA_LLAMA_RUNTIME_ROOT = _env_path("WAN_CUDA_LLAMA_RUNTIME_ROOT", BONSAI_ROOT)
 SUPERTONIC_ROOT = _env_path("WAN_SUPERTONIC_ROOT", LOCAL_AI_ROOT / "Supertonic3")
 KIWIX_ROOT = _env_path("WAN_KIWIX_ROOT", LOCAL_AI_ROOT / "OfflineWikipedia")
 COMFY_URL = os.environ.get("WAN_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -354,6 +355,19 @@ class ComfyController:
         except Exception as exc:
             LOGGER.warning("Could not explicitly unload ComfyUI models: %s", exc)
 
+    async def wait_until_idle(self, timeout_seconds: float = 900) -> None:
+        """Wait for any already-queued ComfyUI work before reclaiming its VRAM."""
+        assert self.session
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            async with self.session.get(f"{COMFY_URL}/queue", timeout=10) as response:
+                queue = await response.json(content_type=None)
+            if not queue.get("queue_running") and not queue.get("queue_pending"):
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timed out waiting for the existing ComfyUI queue to become idle.")
+            await asyncio.sleep(1)
+
     async def interrupt(self) -> None:
         assert self.session
         try:
@@ -408,6 +422,7 @@ MOVIES = MovieManager(APP_DIR, OUTPUT_ROOT, BONSAI_ROOT, CONTROLLER, build_promp
 THEATER = TheaterManager(
     APP_DIR, OUTPUT_ROOT, STORY_MODEL_ROOT, LLAMA_RUNTIME_ROOT,
     SUPERTONIC_ROOT, KIWIX_ROOT, CONTROLLER, build_prompt,
+    cuda_llama_runtime_root=CUDA_LLAMA_RUNTIME_ROOT,
 )
 
 
