@@ -649,8 +649,8 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("The theater prompt is too long (maximum 1,200 characters).")
     mode = str(raw.get("mode", "edutainment"))
     audience = str(raw.get("audience", "family"))
-    if mode not in {"story", "edutainment", "lesson"}:
-        raise ValueError("Choose story, edutainment, or lesson mode.")
+    if mode not in {"interactive", "story", "edutainment", "lesson"}:
+        raise ValueError("Choose interactive character, story, edutainment, or lesson mode.")
     if audience not in {"young", "family", "teen", "adult"}:
         raise ValueError("Choose a supported audience level.")
     voice = str(raw.get("voice", "M1")).upper()
@@ -743,6 +743,28 @@ async def api_theater_stop(request: web.Request) -> web.Response:
 async def api_theater_resume(request: web.Request) -> web.Response:
     try:
         return web.json_response(THEATER.resume(request.match_info["session_id"]))
+    except TheaterError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
+async def api_theater_live_directive(request: web.Request) -> web.Response:
+    try:
+        raw = await request.json()
+        if not isinstance(raw, dict):
+            raise ValueError("Request body must be a JSON object.")
+        return web.json_response(THEATER.add_live_directive(
+            request.match_info["session_id"], raw.get("text", ""), str(raw.get("scope", "next_scene")),
+            str(raw.get("delivery", "after_buffer")),
+        ))
+    except (TheaterError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
+async def api_theater_remove_directive(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(THEATER.remove_live_directive(
+            request.match_info["session_id"], request.match_info["directive_id"],
+        ))
     except TheaterError as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -870,6 +892,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/theater/{session_id}", api_theater_status)
     app.router.add_post("/api/theater/{session_id}/stop", api_theater_stop)
     app.router.add_post("/api/theater/{session_id}/resume", api_theater_resume)
+    app.router.add_post("/api/theater/{session_id}/directives", api_theater_live_directive)
+    app.router.add_delete("/api/theater/{session_id}/directives/{directive_id}", api_theater_remove_directive)
     app.router.add_post("/api/shutdown", api_shutdown)
     app.router.add_static("/static/", STATIC_DIR, show_index=False)
     app.on_startup.append(on_startup)

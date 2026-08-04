@@ -7,7 +7,10 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from app import _is_local_exit_request, build_prompt, validate_movie_payload, validate_payload, validate_theater_payload
+from app import (
+    _is_local_exit_request, api_theater_live_directive, build_prompt, validate_movie_payload, validate_payload,
+    validate_theater_payload,
+)
 from movie_pipeline import MovieManager
 from theater_pipeline import (
     GpuReleaseError, StoryRuntime, SupertonicRuntime, TheaterError, TheaterManager, split_narration_sentences,
@@ -26,6 +29,23 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(_is_local_exit_request(Request("::1", "release-owned-resources")))
         self.assertFalse(_is_local_exit_request(Request("127.0.0.1", "")))
         self.assertFalse(_is_local_exit_request(Request("192.168.1.20", "release-owned-resources")))
+
+    def test_live_directive_api_rejects_non_object_json(self):
+        async def exercise(payload):
+            class Request:
+                match_info = {"session_id": "session"}
+
+                async def json(self):
+                    return payload
+
+            response = await api_theater_live_directive(Request())
+            return response.status, json.loads(response.text)
+
+        for payload in (None, []):
+            with self.subTest(payload=payload):
+                status, body = asyncio.run(exercise(payload))
+                self.assertEqual(status, 400)
+                self.assertEqual(body["error"], "Request body must be a JSON object.")
 
     def test_theater_retries_one_externally_interrupted_ffmpeg_run(self):
         class Process:
@@ -318,6 +338,7 @@ class PromptTests(unittest.TestCase):
                 "story_summary": "Mira guards the gate.",
                 "continuity_memory": {"active_threads": ["Find the key"]},
                 "context_compacted_through_scene": 30,
+                "live_directives": [{"id": "rain", "scope": "persistent", "status": "active", "text": "It rains."}],
                 "metrics": {"context_compaction_events": [{"through_scene": 30}]},
             }
             manager._write_playlist(state)
@@ -325,6 +346,7 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(archive["context_compacted_through_scene"], 30)
         self.assertEqual(archive["continuity_memory"]["active_threads"], ["Find the key"])
         self.assertEqual(archive["context_compaction_events"][0]["through_scene"], 30)
+        self.assertEqual(archive["live_directives"][0]["id"], "rain")
 
     def test_coverage_uses_completed_segment_cadence(self):
         async def exercise(root: Path):
@@ -522,6 +544,36 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Never delay, remove, reverse or contradict", prompt)
         self.assertIn("MANDATORY OUTPUT LANGUAGE: Finnish (suomi) [fi]", prompt)
         self.assertIn("Do not translate the user's story into English", prompt)
+
+    def test_interactive_character_mode_reuses_pure_story_resources_and_translation(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        config = validate_theater_payload({
+            "prompt": "A lighthouse keeper talks with viewers.",
+            "mode": "interactive", "language": "fi", "translation_language": "en",
+        })
+        prompt = manager._system_prompt(config)
+        self.assertEqual(config["mode"], "interactive")
+        self.assertEqual(config["translation_language"], "en")
+        self.assertFalse(manager.uses_grounding(config))
+        self.assertIn("one stable primary on-screen host", prompt)
+        self.assertIn("host's natural first-person speech", prompt)
+        self.assertIn("delayed turns, not real-time perception", prompt)
+
+    def test_interactive_visual_prompt_keeps_host_present_and_recognizable(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        state = {
+            "config": {"mode": "interactive"},
+            "bible": {
+                "visual_style": "cinematic documentary", "world": "an old lighthouse",
+                "protagonists": [{"name": "Mira", "role": "keeper", "appearance": "yellow coat"}],
+                "premise_contract": ["Mira repairs the lamp"], "continuity_rules": ["The storm continues"],
+            },
+        }
+        prompt = manager._visual_prompt(state, {
+            "camera": "medium shot", "visual_action": "Mira cleans a brass lens.",
+        })
+        self.assertIn("primary host clearly recognizable and present", prompt)
+        self.assertIn("natural near-camera eyeline", prompt)
 
     def test_gemma4_e4b_is_primary_and_uses_measured_settings(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -979,9 +1031,15 @@ class PromptTests(unittest.TestCase):
                 "config": validate_theater_payload({"prompt": "A path", "translation_language": "fi"}),
                 "bible": {}, "story_summary": "They are ready.",
                 "continuity_memory": {"active_threads": ["Find the gate"]}, "planned": [],
+                "live_directives": [{
+                    "id": "storm", "scope": "next_scene", "status": "pending",
+                    "text": "A sudden storm forces them into the lighthouse.",
+                }],
                 "metrics": {"production_ema": 40.0},
             }
             scene = await manager._plan_next(state, 2, [])
+            manager._log_live_directive = lambda *_args: None
+            manager._mark_directives_applied(state, scene)
             return requests[0], state["metrics"], scene
 
         with tempfile.TemporaryDirectory() as directory:
@@ -991,8 +1049,208 @@ class PromptTests(unittest.TestCase):
         self.assertIn("exactly 6 complete sentences", request)
         self.assertIn("sentence contain 7-7 words", request)
         self.assertIn("Find the gate", request)
+        self.assertIn("LIVE WORLD EVENTS AND DIRECTIONS", request)
+        self.assertIn("A sudden storm forces them into the lighthouse", request)
         self.assertEqual(metrics["planner_prompt_tokens"], 420)
         self.assertEqual(scene["planner_metrics"]["elapsed_seconds"], 1.2)
+        self.assertEqual(scene["_live_directive_ids"], ["storm"])
+
+    def test_live_steering_rolls_back_only_unrendered_plans_and_causal_state(self):
+        manager = TheaterManager.__new__(TheaterManager)
+        state = {
+            "story_summary": "Scene three already happened.",
+            "continuity_memory": {"active_threads": ["Wrong future"]},
+            "context_compacted_through_scene": 3,
+            "planned": [
+                {"number": 1, "title": "Archived"},
+                {
+                    "number": 2, "title": "Speculative", "_planning_context_before": {
+                        "story_summary": "Only scene one happened.",
+                        "has_continuity_memory": True,
+                        "continuity_memory": {"active_threads": ["Original thread"]},
+                        "has_compaction_boundary": True,
+                        "context_compacted_through_scene": 1,
+                        "context_compaction_metrics": {"last_context_compaction_scene": 1},
+                    },
+                },
+                {"number": 3, "title": "More speculation"},
+            ],
+            "live_directives": [{
+                "id": "storm", "scope": "next_scene", "status": "applied", "applied_scene": 2,
+            }, {
+                "id": "rain", "scope": "persistent", "status": "active", "first_applied_scene": 2,
+            }],
+            "metrics": {
+                "last_context_compaction_scene": 3, "context_compaction_count": 2,
+                "planner_repair_reason": "stale output",
+            },
+        }
+        discarded = manager._rollback_speculative_plans(state, {1})
+        self.assertEqual(discarded, 2)
+        self.assertEqual([item["number"] for item in state["planned"]], [1])
+        self.assertEqual(state["story_summary"], "Only scene one happened.")
+        self.assertEqual(state["continuity_memory"]["active_threads"], ["Original thread"])
+        self.assertEqual(state["context_compacted_through_scene"], 1)
+        self.assertEqual(state["metrics"]["last_context_compaction_scene"], 1)
+        self.assertNotIn("context_compaction_count", state["metrics"])
+        self.assertNotIn("planner_repair_reason", state["metrics"])
+        self.assertEqual(state["live_directives"][0]["status"], "pending")
+        self.assertNotIn("first_applied_scene", state["live_directives"][1])
+        self.assertEqual(state["metrics"]["last_live_steering_scene"], 2)
+
+    def test_run_rebinds_workers_without_dropping_prepared_scenes_on_live_steering(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            prepared = [
+                {"number": 2, "title": "Prepared two", "narration_sentences": [{"original": "Two."}]},
+                {"number": 3, "title": "Prepared three", "narration_sentences": [{"original": "Three."}]},
+            ]
+            completed = {"number": 1, "title": "Completed", "path": "scene-1.mp4"}
+            state = {
+                "id": "session",
+                "config": validate_theater_payload({"prompt": "A continuous story", "mode": "story"}),
+                "bible": {"premise": "Keep going"},
+                "story_summary": "Scene one is complete.",
+                "segments": [completed],
+                "planned": [{"number": 1, "title": "Completed"}, *prepared],
+                "metrics": {},
+                "live_directives": [],
+            }
+
+            class Runtime:
+                gpu_available = False
+
+                async def start(self, *_args, **_kwargs):
+                    return None
+
+            async def idle(*_args):
+                await asyncio.Event().wait()
+
+            steering_event = asyncio.Event()
+            steering_event.set()
+            manager.root = root
+            manager.writer = Runtime()
+            manager.supertonic = Runtime()
+            manager.steering_events = {"session": steering_event}
+            manager._save = lambda _state: None
+            manager._planner_loop = idle
+            manager._translation_loop = idle
+            manager._assembly_loop = idle
+            bindings = []
+            original_restore = manager._restore_story_workers
+
+            def track_restore(inner_state, excluded_numbers):
+                result = original_restore(inner_state, excluded_numbers)
+                bindings.append(result)
+                return result
+
+            manager._restore_story_workers = track_restore
+            rebuilt_ready_numbers = []
+
+            async def inspect_rebuilt_queue(queue, _translation_task):
+                rebuilt_ready_numbers.extend(item["number"] for item in list(queue._queue))
+                raise asyncio.CancelledError
+
+            manager._next_planned_scene = inspect_rebuilt_queue
+            with self.assertRaises(asyncio.CancelledError):
+                await manager._run(state)
+            return state, steering_event, bindings, rebuilt_ready_numbers, completed
+
+        with tempfile.TemporaryDirectory() as directory:
+            state, event, bindings, ready_numbers, completed = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(state["segments"], [completed])
+        self.assertFalse(event.is_set())
+        self.assertEqual(ready_numbers, [2, 3])
+        self.assertEqual(len(bindings), 2)
+        self.assertIsNot(bindings[0][0], bindings[1][0])
+        self.assertIsNot(bindings[0][1], bindings[1][1])
+        self.assertTrue(all(task.done() for binding in bindings for task in binding[2:]))
+
+    def test_delayed_directive_preserves_buffer_while_fast_directive_wakes_pipeline(self):
+        async def exercise(root: Path):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            (root / "session" / "logs").mkdir(parents=True)
+            state = {
+                "id": "session", "segments": [], "live_directives": [],
+                "planned": [{"number": 1}, {"number": 2}, {"number": 3}],
+                "metrics": {"planner_cycle_started_at": time.time()},
+            }
+            task = asyncio.create_task(asyncio.sleep(60))
+            manager.sessions = {"session": state}
+            manager.tasks = {"session": task}
+            manager.steering_events = {"session": asyncio.Event()}
+            manager._save = lambda _state: None
+            try:
+                manager.add_live_directive("session", "  Keep the lighthouse visible.  ", "persistent")
+                delayed = dict(state["live_directives"][0])
+                woke_for_delayed = manager.steering_events["session"].is_set()
+                manager.remove_live_directive("session", delayed["id"])
+                woke_for_delayed_remove = manager.steering_events["session"].is_set()
+                manager.add_live_directive(
+                    "session", "Open the red door now.", "next_scene", "next_unrendered",
+                )
+                fast = dict(state["live_directives"][1])
+                return delayed, fast, woke_for_delayed, woke_for_delayed_remove, manager.steering_events["session"].is_set(), state
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            delayed, fast, woke_for_delayed, woke_for_remove, woke_for_fast, state = asyncio.run(exercise(Path(directory)))
+        self.assertEqual(delayed["text"], "Keep the lighthouse visible.")
+        self.assertEqual(delayed["status"], "active")
+        self.assertEqual(delayed["delivery"], "after_buffer")
+        self.assertEqual(delayed["activation_scene"], 5)
+        self.assertFalse(woke_for_delayed)
+        self.assertFalse(woke_for_remove)
+        self.assertEqual(fast["delivery"], "next_unrendered")
+        self.assertTrue(woke_for_fast)
+        self.assertEqual(state["live_directives"][0]["status"], "removed")
+
+    def test_delayed_direction_is_hidden_from_gemma_until_reserved_scene(self):
+        state = {"live_directives": [{
+            "id": "later", "scope": "next_scene", "status": "pending", "delivery": "after_buffer",
+            "activation_scene": 7, "text": "The comet becomes visible.",
+        }]}
+        early_prompt, early_ids = TheaterManager._steering_context(state, 6)
+        ready_prompt, ready_ids = TheaterManager._steering_context(state, 7)
+        self.assertEqual(early_prompt, "")
+        self.assertEqual(early_ids, [])
+        self.assertIn("The comet becomes visible", ready_prompt)
+        self.assertEqual(ready_ids, ["later"])
+
+    def test_audience_chat_is_a_single_durable_turn_only_in_interactive_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = Path(directory)
+            manager.tasks = {}
+            manager.steering_events = {}
+            manager._save = lambda _state: None
+            ordinary = {
+                "id": "ordinary", "config": {"mode": "story"}, "planned": [], "segments": [],
+                "metrics": {}, "live_directives": [],
+            }
+            interactive = {
+                "id": "interactive", "config": {"mode": "interactive"}, "planned": [], "segments": [],
+                "metrics": {}, "live_directives": [],
+            }
+            manager.sessions = {"ordinary": ordinary, "interactive": interactive}
+            with self.assertRaisesRegex(TheaterError, "Interactive character"):
+                manager.add_live_directive("ordinary", "How was your day?", "audience_message")
+            manager.add_live_directive("interactive", "How was your day?", "audience_message")
+            directive = interactive["live_directives"][0]
+            prompt, ids = manager._steering_context(interactive, directive["activation_scene"])
+            self.assertEqual(directive["status"], "pending")
+            self.assertEqual(directive["delivery"], "after_buffer")
+            self.assertIn("delayed viewer speech", prompt)
+            self.assertIn("answer it naturally", prompt)
+            self.assertEqual(ids, [directive["id"]])
+            manager._log_live_directive = lambda *_args: None
+            manager._mark_directives_applied(
+                interactive, {"number": directive["activation_scene"], "_live_directive_ids": ids},
+            )
+            self.assertEqual(directive["status"], "applied")
 
     def test_live_word_target_stays_inside_custom_budget(self):
         manager = TheaterManager.__new__(TheaterManager)

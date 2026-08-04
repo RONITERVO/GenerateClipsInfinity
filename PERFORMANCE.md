@@ -180,6 +180,26 @@ An educational-mode attempt is intentionally excluded from the comparison. Its r
 
 ## Current deliberate tradeoffs
 
+### Scene-bound live steering instead of a resident world model
+
+Modern interactive world models combine a persistent generated environment with low-latency actions and promptable events. The installed pipeline cannot reproduce that frame-level architecture: Wan produces a bounded video clip in tens of seconds and cannot remain resident beside Gemma within 12 GB VRAM. Installing another experimental model would not remove that physical scheduling constraint.
+
+Live direction therefore operates at the durable scene-planning boundary. Its default delivery mode computes an activation scene after the complete saved plan buffer plus a scene request already in flight. Until that exact number, the directive is excluded from Gemma prompts. No worker is woken or cancelled, no queue is rebuilt, and no prepared text, translation, narration, or media is discarded. This is the throughput-preserving equivalent of delayed live chat: response latency is intentionally traded for zero deliberate disruption.
+
+An explicit fast mode sets an in-process wake event. The current Wan render is protected. The CPU planner and translation workers are cancelled at cooperative await boundaries, causal state is restored from the first unrendered plan's checkpoint, only the speculative text suffix is discarded, and the existing bounded workers are reconstructed. Persistent rules are included in every eligible later Gemma request; a one-scene event is atomically marked applied with the accepted plan and is reopened if that plan is rolled back.
+
+Only fast mode costs a replanning cycle after user intervention; neither mode adds a continuously resident model, VRAM contention, or a new inference service. The checkpoint prevents the more damaging failure mode where `story_summary` contains discarded future events. Measure steering latency from directive creation to the `applied_scene` plan and then to that segment's `created` timestamp. For delayed delivery, also record `activation_scene` and planned depth at submission. Do not report browser submission latency as world response time. Completed media and a render already submitted to ComfyUI are intentionally immutable, so the honest UI promises are “after planned buffer” and “next unrendered scene,” not “instant.”
+
+The directive schema and HTTP boundary are renderer-independent. A future validated local world model can consume the same `audience_message`, `next_scene`, and `persistent` inputs while keeping the archive and UI contract. Until such a model fits and demonstrates better end-to-end latency and continuity on this machine, this boundary is the long-term compatibility layer rather than a temporary prompt concatenation trick.
+
+#### Interactive character show cost model
+
+Interactive character mode is a Pure Story scheduling profile, not another runtime. It does not start Kiwix, ASR, a realtime avatar renderer, WebRTC, or an additional language-model request. The stable host contract is kept in the ordinary story bible; an eligible `audience_message` is included in the next normal planner request and is consumed once with that accepted scene. The existing translation worker still performs the optional one-to-one bilingual pass, and the combined original-plus-translation speech remains inside the configured total word budget.
+
+The performance target is therefore parity with Pure Story completed-scene cadence, not conversational round-trip latency. For delayed messages, measure `created_at → applied_at → segment.created` and retain the reserved `activation_scene`. Prompt overhead is bounded by the existing maximum of 12 active inputs and 500 characters per input. With the default delayed delivery there is no intentional worker cancellation or generation bubble; fast delivery retains the explicitly documented replanning cost.
+
+Visual identity is the limiting quality boundary. The current Wan text-to-video workflow receives the fixed host description, world, continuity rules, and near-camera host framing on every scene, but it is not an identity-conditioned or lip-synchronized avatar model. Do not trade the validated 81-frame Cinema workflow for repeated canned idle loops merely to advertise lower chat latency: that would conflict with the project's unique-asset policy and would not improve the time until a genuinely new scene is ready. Future renderer experiments should preserve the `audience_message` event and transcript schema so they can replace only the visual layer after proving identity, latency, VRAM fit, and offline durability on the reference machine.
+
 ### Hybrid Gemma GPU burst and CPU sustain
 
 The steady-state writer runs with `-ngl 0`, eight CPU threads, two parallel request slots, a 32K shared context allocation that preserves 16K per slot, 512-token batches, 128-token microbatches, and memory mapping disabled. Keeping this sustaining writer off the GPU allows planning and translation to overlap Wan rendering.
