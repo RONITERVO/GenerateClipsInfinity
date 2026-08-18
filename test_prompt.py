@@ -146,12 +146,14 @@ class PromptTests(unittest.TestCase):
                 "quality_settings": {"width": 480, "height": 272, "frames": 18, "fps": 16},
             })
 
-    def test_legacy_routes_redirect_to_root(self):
+    def test_app_routes(self):
         app = create_app()
         routes = [r.resource.canonical for r in app.router.routes() if r.method == "GET"]
         self.assertIn("/", routes)
-        self.assertIn("/theater", routes)
-        self.assertIn("/movie", routes)
+        self.assertIn("/api/config", routes)
+        self.assertIn("/api/status", routes)
+        self.assertIn("/api/video", routes)
+        self.assertIn("/api/theater", routes)
 
     def test_theater_sync_uses_one_encode_graph_for_slow_and_repeated_motion(self):
         quality = {"frames": 81, "fps": 16, "max_slow": 8.0}

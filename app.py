@@ -30,10 +30,9 @@ def _env_path(name: str, default: Path) -> Path:
 AI_ROOT = _env_path("WAN_AI_ROOT", Path(r"D:\AI"))
 LOCAL_AI_ROOT = _env_path("WAN_LOCAL_AI_ROOT", Path(r"D:\LocalAI"))
 COMFY_ROOT = _env_path("WAN_COMFY_ROOT", AI_ROOT / "ComfyUI")
-BONSAI_ROOT = _env_path("WAN_BONSAI_ROOT", LOCAL_AI_ROOT / "Bonsai27B")
 STORY_MODEL_ROOT = _env_path("WAN_GEMMA4_ROOT", LOCAL_AI_ROOT / "Gemma4E4B")
 LLAMA_RUNTIME_ROOT = _env_path("WAN_LLAMA_RUNTIME_ROOT", STORY_MODEL_ROOT)
-CUDA_LLAMA_RUNTIME_ROOT = _env_path("WAN_CUDA_LLAMA_RUNTIME_ROOT", BONSAI_ROOT)
+CUDA_LLAMA_RUNTIME_ROOT = _env_path("WAN_CUDA_LLAMA_RUNTIME_ROOT", LOCAL_AI_ROOT / "Bonsai27B")
 SUPERTONIC_ROOT = _env_path("WAN_SUPERTONIC_ROOT", LOCAL_AI_ROOT / "Supertonic3")
 KIWIX_ROOT = _env_path("WAN_KIWIX_ROOT", LOCAL_AI_ROOT / "OfflineWikipedia")
 COMFY_URL = os.environ.get("WAN_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -401,11 +400,7 @@ THEATER = TheaterManager(
 
 
 async def index(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "theater.html")
-
-
-async def redirect_to_index(_: web.Request) -> web.Response:
-    raise web.HTTPFound("/")
+    return web.FileResponse(STATIC_DIR / "index.html")
 
 
 async def api_status(_: web.Request) -> web.Response:
@@ -670,8 +665,6 @@ def create_app() -> web.Application:
         "comfy_start_task": None,
     }
     app.router.add_get("/", index)
-    app.router.add_get("/theater", redirect_to_index)
-    app.router.add_get("/movie", redirect_to_index)
     app.router.add_get("/api/config", api_config)
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/video", api_video)

@@ -27,7 +27,7 @@ End If
 app = fileSystem.BuildPath(appDir, "app.py")
 
 If pythonw = "" Or Not fileSystem.FileExists(pythonw) Then
-  MsgBox "Python was not found at: " & vbCrLf & pythonw & vbCrLf & vbCrLf & "Please set WAN_PYTHONW_EXE or WAN_COMFY_ROOT environment variable.", 16, "Wan Video Studio"
+  MsgBox "Python was not found at: " & vbCrLf & pythonw & vbCrLf & vbCrLf & "Please set WAN_PYTHONW_EXE or WAN_COMFY_ROOT environment variable.", 16, "Wan Endless Theater"
   WScript.Quit 1
 End If
 
