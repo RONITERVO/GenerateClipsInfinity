@@ -15,7 +15,6 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from movie_pipeline import MovieError, MovieManager
 from process_utils import terminate_process_tree
 from theater_pipeline import SupertonicRuntime, TheaterError, TheaterManager
 
@@ -31,10 +30,9 @@ def _env_path(name: str, default: Path) -> Path:
 AI_ROOT = _env_path("WAN_AI_ROOT", Path(r"D:\AI"))
 LOCAL_AI_ROOT = _env_path("WAN_LOCAL_AI_ROOT", Path(r"D:\LocalAI"))
 COMFY_ROOT = _env_path("WAN_COMFY_ROOT", AI_ROOT / "ComfyUI")
-BONSAI_ROOT = _env_path("WAN_BONSAI_ROOT", LOCAL_AI_ROOT / "Bonsai27B")
 STORY_MODEL_ROOT = _env_path("WAN_GEMMA4_ROOT", LOCAL_AI_ROOT / "Gemma4E4B")
 LLAMA_RUNTIME_ROOT = _env_path("WAN_LLAMA_RUNTIME_ROOT", STORY_MODEL_ROOT)
-CUDA_LLAMA_RUNTIME_ROOT = _env_path("WAN_CUDA_LLAMA_RUNTIME_ROOT", BONSAI_ROOT)
+CUDA_LLAMA_RUNTIME_ROOT = _env_path("WAN_CUDA_LLAMA_RUNTIME_ROOT", LOCAL_AI_ROOT / "Bonsai27B")
 SUPERTONIC_ROOT = _env_path("WAN_SUPERTONIC_ROOT", LOCAL_AI_ROOT / "Supertonic3")
 KIWIX_ROOT = _env_path("WAN_KIWIX_ROOT", LOCAL_AI_ROOT / "OfflineWikipedia")
 COMFY_URL = os.environ.get("WAN_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -179,59 +177,26 @@ def build_prompt(config: dict[str, Any]) -> dict[str, Any]:
             "inputs": {"samples": ["12", 0], "vae": ["13", 0]},
         },
         "15": {
-            "class_type": "CreateVideo",
-            "inputs": {"images": ["14", 0], "fps": fps},
+            "class_type": "CreateVorbisAudio",
+            "inputs": {
+                "sound": "silence",
+                "duration": frames / fps,
+                "sample_rate": 44100,
+            },
         },
         "16": {
             "class_type": "SaveVideo",
             "inputs": {
-                "video": ["15", 0],
+                "images": ["14", 0],
+                "audio": ["15", 0],
                 "filename_prefix": prefix,
+                "fps": fps,
                 "format": "mp4",
-                "codec": "h264",
+                "pix_fmt": "yuv420p",
+                "crf": 19,
+                "save_output": True,
             },
         },
-    }
-
-
-def validate_payload(raw: dict[str, Any]) -> dict[str, Any]:
-    prompt = str(raw.get("prompt", "")).strip()
-    if not prompt:
-        raise ValueError("Write a prompt before generating.")
-    if len(prompt) > 4000:
-        raise ValueError("Prompt is too long (maximum 4,000 characters).")
-
-    negative = str(raw.get("negative", DEFAULT_NEGATIVE)).strip()
-    width = int(raw.get("width", 480))
-    height = int(raw.get("height", 272))
-    frames = int(raw.get("frames", 17))
-    fps = float(raw.get("fps", 16))
-    seed_value = raw.get("seed", -1)
-    seed = int(seed_value) if str(seed_value).strip() else -1
-
-    if width < 192 or width > 832 or width % 16:
-        raise ValueError("Width must be a multiple of 16 between 192 and 832.")
-    if height < 192 or height > 832 or height % 16:
-        raise ValueError("Height must be a multiple of 16 between 192 and 832.")
-    if frames < 9 or frames > 81 or (frames - 1) % 4:
-        raise ValueError("Frames must be 9–81 and follow the 4n+1 rule.")
-    if fps < 8 or fps > 30:
-        raise ValueError("FPS must be between 8 and 30.")
-    if seed < -1 or seed > 2**63 - 1:
-        raise ValueError("Seed must be -1 (random) or a non-negative 64-bit integer.")
-    if seed == -1:
-        seed = secrets.randbits(63)
-
-    stamp = time.strftime("%Y-%m-%d/%H%M%S")
-    return {
-        "prompt": prompt,
-        "negative": negative,
-        "width": width,
-        "height": height,
-        "frames": frames,
-        "fps": fps,
-        "seed": seed,
-        "filename_prefix": f"wan_ui/{stamp}_seed{seed}",
     }
 
 
@@ -327,7 +292,7 @@ class ComfyController:
         ]
         stdout_path = LOG_DIR / "comfyui.out.log"
         stderr_path = LOG_DIR / "comfyui.err.log"
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
             self.process = subprocess.Popen(
                 args,
@@ -427,7 +392,6 @@ class ComfyController:
 
 
 CONTROLLER = ComfyController()
-MOVIES = MovieManager(APP_DIR, OUTPUT_ROOT, BONSAI_ROOT, CONTROLLER, build_prompt)
 THEATER = TheaterManager(
     APP_DIR, OUTPUT_ROOT, STORY_MODEL_ROOT, LLAMA_RUNTIME_ROOT,
     SUPERTONIC_ROOT, KIWIX_ROOT, CONTROLLER, build_prompt,
@@ -437,14 +401,6 @@ THEATER = TheaterManager(
 
 async def index(_: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "index.html")
-
-
-async def movie_page(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "movie.html")
-
-
-async def theater_page(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "theater.html")
 
 
 async def api_status(_: web.Request) -> web.Response:
@@ -469,70 +425,6 @@ async def api_config(_: web.Request) -> web.Response:
     return web.json_response({"comfy_url": COMFY_URL})
 
 
-async def api_start(_: web.Request) -> web.Response:
-    try:
-        stats = await CONTROLLER.ensure_ready()
-        return web.json_response({"ready": True, "stats": stats})
-    except Exception as exc:
-        LOGGER.exception("Could not start ComfyUI")
-        return web.json_response({"error": str(exc)}, status=500)
-
-
-async def api_generate(request: web.Request) -> web.Response:
-    if THEATER.active():
-        return web.json_response({"error": "The endless theater is using the local models. Stop it first."}, status=409)
-    if any(job.get("status") in {"queued", "planning", "rendering", "narrating", "assembling"} for job in MOVIES.jobs.values()):
-        return web.json_response({"error": "An overnight movie is using the local models. Wait for it to finish or cancel it first."}, status=409)
-    try:
-        config = validate_payload(await request.json())
-        client_id = request.headers.get("X-Client-ID") or str(uuid.uuid4())
-        result = await CONTROLLER.submit(build_prompt(config), client_id)
-        if result.get("node_errors"):
-            raise RuntimeError(json.dumps(result["node_errors"]))
-        LOGGER.info("Queued prompt %s with seed %s", result.get("prompt_id"), config["seed"])
-        return web.json_response(
-            {
-                "prompt_id": result["prompt_id"],
-                "queue_number": result.get("number"),
-                "seed": config["seed"],
-                "client_id": client_id,
-            }
-        )
-    except (ValueError, TypeError) as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-    except Exception as exc:
-        LOGGER.exception("Generation request failed")
-        return web.json_response({"error": str(exc)}, status=500)
-
-
-async def api_job(request: web.Request) -> web.Response:
-    prompt_id = request.match_info["prompt_id"]
-    try:
-        return web.json_response(await CONTROLLER.job(prompt_id))
-    except Exception as exc:
-        return web.json_response({"state": "unavailable", "error": str(exc)}, status=503)
-
-
-async def api_recent(_: web.Request) -> web.Response:
-    folder = OUTPUT_ROOT / "wan_ui"
-    files: list[dict[str, Any]] = []
-    if folder.exists():
-        candidates = sorted(
-            (p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in {".mp4", ".webm"}),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:12]
-        for path in candidates:
-            files.append(
-                {
-                    "path": str(path.relative_to(OUTPUT_ROOT)).replace("\\", "/"),
-                    "filename": path.name,
-                    "created": path.stat().st_mtime,
-                }
-            )
-    return web.json_response({"files": files})
-
-
 async def api_video(request: web.Request) -> web.StreamResponse:
     relative = request.query.get("path", "")
     if not relative:
@@ -545,100 +437,6 @@ async def api_video(request: web.Request) -> web.StreamResponse:
     if candidate.suffix.lower() not in {".mp4", ".webm", ".wav", ".flac", ".mp3", ".ogg", ".m4a"} or not candidate.is_file():
         raise web.HTTPNotFound(text="Media not found")
     return web.FileResponse(candidate)
-
-
-def validate_movie_payload(raw: dict[str, Any]) -> dict[str, Any]:
-    sentence = str(raw.get("sentence", "")).strip()
-    if not sentence:
-        raise ValueError("Write a one-sentence movie idea first.")
-    if len(sentence) > 1000:
-        raise ValueError("The movie idea is too long (maximum 1,000 characters).")
-    shots = int(raw.get("shots", 12))
-    width = int(raw.get("width", 480))
-    height = int(raw.get("height", 272))
-    frames = int(raw.get("frames", 81))
-    fps = int(raw.get("fps", 16))
-    seed = int(raw.get("seed", -1))
-    if shots < 3 or shots > 48:
-        raise ValueError("Movie length must be between 3 and 48 shots.")
-    if width < 192 or width > 640 or width % 16 or height < 192 or height > 640 or height % 16:
-        raise ValueError("Movie dimensions must be multiples of 16 between 192 and 640.")
-    if frames < 9 or frames > 81 or (frames - 1) % 4:
-        raise ValueError("Frames must be 9–81 and follow the 4n+1 rule.")
-    if fps < 8 or fps > 24:
-        raise ValueError("Movie FPS must be between 8 and 24.")
-    if seed < -1 or seed > 2**63 - 1:
-        raise ValueError("Seed must be -1 or a non-negative 64-bit integer.")
-    if seed == -1:
-        seed = secrets.randbits(63)
-    sync_mode = str(raw.get("sync_mode", "fit_video_to_audio"))
-    fill_mode = str(raw.get("fill_mode", "freeze"))
-    if sync_mode not in {"fit_video_to_audio", "fit_audio_to_video", "fixed_fps_fill"}:
-        raise ValueError("Unknown synchronization mode.")
-    if fill_mode not in {"freeze", "loop", "pingpong", "black"}:
-        raise ValueError("Unknown visual fill mode.")
-    return {
-        "sentence": sentence, "shots": shots, "width": width, "height": height,
-        "frames": frames, "fps": fps, "seed": seed,
-        "narration": bool(raw.get("narration", True)),
-        "sync_mode": sync_mode, "fill_mode": fill_mode,
-        "motion_interpolation": bool(raw.get("motion_interpolation", True)),
-    }
-
-
-async def api_movie_start(request: web.Request) -> web.Response:
-    try:
-        if THEATER.active():
-            return web.json_response({"error": "The endless theater is using the local models. Stop it first."}, status=409)
-        config = validate_movie_payload(await request.json())
-        active = next((job for job in MOVIES.jobs.values() if job.get("status") in {"queued", "planning", "rendering", "narrating", "assembling"}), None)
-        if active:
-            return web.json_response({"error": f"Movie {active['id']} is already running.", "job": active}, status=409)
-        return web.json_response(MOVIES.start(config))
-    except (ValueError, TypeError) as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-
-
-async def api_movie_status(request: web.Request) -> web.Response:
-    state = MOVIES.get(request.match_info["job_id"])
-    if not state:
-        raise web.HTTPNotFound(text="Movie job not found")
-    return web.json_response(state)
-
-
-async def api_movie_recent(_: web.Request) -> web.Response:
-    return web.json_response({"jobs": MOVIES.recent()})
-
-
-async def api_movie_resume(request: web.Request) -> web.Response:
-    try:
-        return web.json_response(MOVIES.resume(request.match_info["job_id"]))
-    except MovieError as exc:
-        return web.json_response({"error": str(exc)}, status=404)
-
-
-async def api_movie_cancel(request: web.Request) -> web.Response:
-    await MOVIES.cancel(request.match_info["job_id"])
-    state = MOVIES.get(request.match_info["job_id"])
-    return web.json_response(state or {"status": "cancelled"})
-
-
-async def api_movie_save_edits(request: web.Request) -> web.Response:
-    try:
-        body = await request.json()
-        return web.json_response(MOVIES.save_edits(request.match_info["job_id"], body.get("edits", [])))
-    except (MovieError, ValueError, TypeError) as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-
-
-async def api_movie_render_edit(request: web.Request) -> web.Response:
-    try:
-        body = await request.json()
-        if "edits" in body:
-            MOVIES.save_edits(request.match_info["job_id"], body["edits"])
-        return web.json_response(MOVIES.render_edit(request.match_info["job_id"]))
-    except (MovieError, ValueError, TypeError) as exc:
-        return web.json_response({"error": str(exc)}, status=400)
 
 
 def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
@@ -715,8 +513,6 @@ def validate_theater_payload(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 async def api_theater_start(request: web.Request) -> web.Response:
-    if any(job.get("status") in {"queued", "planning", "rendering", "narrating", "assembling"} for job in MOVIES.jobs.values()):
-        return web.json_response({"error": "A finite movie is using the local models. Stop or finish it first."}, status=409)
     try:
         return web.json_response(THEATER.start(validate_theater_payload(await request.json())))
     except (TheaterError, ValueError, TypeError) as exc:
@@ -812,7 +608,6 @@ async def _release_owned_resources(app: web.Application) -> None:
         ("cancel background ComfyUI startup", cancel_background_start),
         ("interrupt ComfyUI work", CONTROLLER.interrupt),
         ("archive Theater work and stop Theater helpers", THEATER.shutdown),
-        ("archive movie work and stop the movie planner", MOVIES.shutdown),
         ("unload ComfyUI models", CONTROLLER.free_models),
         ("stop app-owned ComfyUI", CONTROLLER.stop_owned_process),
     )
@@ -844,7 +639,6 @@ async def api_shutdown(request: web.Request) -> web.Response:
 
 async def on_startup(app: web.Application) -> None:
     await CONTROLLER.open()
-    MOVIES.load_existing()
     THEATER.load_existing()
     (APP_DIR / "wan-video-ui.pid").write_text(str(os.getpid()), encoding="utf-8")
     app[RUNTIME_STATE]["comfy_start_task"] = asyncio.create_task(
@@ -871,22 +665,9 @@ def create_app() -> web.Application:
         "comfy_start_task": None,
     }
     app.router.add_get("/", index)
-    app.router.add_get("/movie", movie_page)
-    app.router.add_get("/theater", theater_page)
     app.router.add_get("/api/config", api_config)
     app.router.add_get("/api/status", api_status)
-    app.router.add_post("/api/start", api_start)
-    app.router.add_post("/api/generate", api_generate)
-    app.router.add_get("/api/jobs/{prompt_id}", api_job)
-    app.router.add_get("/api/recent", api_recent)
     app.router.add_get("/api/video", api_video)
-    app.router.add_post("/api/movies", api_movie_start)
-    app.router.add_get("/api/movies", api_movie_recent)
-    app.router.add_get("/api/movies/{job_id}", api_movie_status)
-    app.router.add_post("/api/movies/{job_id}/resume", api_movie_resume)
-    app.router.add_post("/api/movies/{job_id}/cancel", api_movie_cancel)
-    app.router.add_post("/api/movies/{job_id}/edits", api_movie_save_edits)
-    app.router.add_post("/api/movies/{job_id}/render", api_movie_render_edit)
     app.router.add_post("/api/theater", api_theater_start)
     app.router.add_get("/api/theater", api_theater_recent)
     app.router.add_post("/api/theater/voice-preview", api_theater_voice_preview)
@@ -917,7 +698,7 @@ async def _serve() -> None:
 def main() -> None:
     if not COMFY_ROOT.exists():
         raise SystemExit(f"ComfyUI was not found at {COMFY_ROOT}")
-    LOGGER.info("Starting Wan Video UI on http://%s:%s", HOST, PORT)
+    LOGGER.info("Starting Wan Endless Theater on http://%s:%s", HOST, PORT)
     try:
         asyncio.run(_serve())
     except KeyboardInterrupt:
