@@ -327,14 +327,60 @@
     });
   }
 
+  let chatScope = 'next_scene'; // 'audience_message', 'next_scene', 'persistent'
+  let chatDelivery = 'after_buffer'; // 'after_buffer', 'next_unrendered'
+
+  function getConsequenceHint() {
+    if (chatScope === 'audience_message') {
+      return 'Host acknowledges and answers your message naturally in an upcoming turn.';
+    }
+    if (chatScope === 'next_scene') {
+      return chatDelivery === 'after_buffer'
+        ? 'Non-disruptive one-scene event queued after buffer. Existing work continues.'
+        : 'Fast steering: cancels speculative planning and rebuilds next unrendered scene.';
+    }
+    if (chatScope === 'persistent') {
+      return chatDelivery === 'after_buffer'
+        ? 'Lasting world rule queued safely after buffer. Applies to all future scenes.'
+        : 'Lasting world rule applied immediately on next unrendered scene.';
+    }
+    return '';
+  }
+
   function renderLiveChat() {
     const body = $('sidebarBody');
+    const isInteractive = state?.config?.mode === 'interactive';
+    if (isInteractive && chatScope !== 'audience_message' && chatScope !== 'persistent' && chatScope !== 'next_scene') {
+      chatScope = 'audience_message';
+    } else if (!isInteractive && chatScope === 'audience_message') {
+      chatScope = 'next_scene';
+    }
+
     body.innerHTML = `
       <div class="yt-chat-container">
+        <div class="yt-chat-banner" id="chatBanner">
+          ${isInteractive ? 'Interactive Mode: Chat with host character or direct world.' : 'Live Directives: Steer living world events and lasting rules.'}
+        </div>
         <div class="yt-chat-messages" id="chatMsgList"></div>
         <div class="yt-chat-input-row">
-          <textarea class="yt-chat-input" id="chatInput" placeholder="Send a message to host or direct story…"></textarea>
-          <button class="yt-chat-send-btn" id="btnSendChat">Send</button>
+          <div class="yt-chat-options-bar">
+            <div class="yt-scope-group">
+              ${isInteractive ? `<button class="yt-mini-chip ${chatScope === 'audience_message' ? 'active' : ''}" type="button" id="chipScopeChat">💬 Chat Host</button>` : ''}
+              <button class="yt-mini-chip ${chatScope === 'next_scene' ? 'active' : ''}" type="button" id="chipScopeEvent">⚡ Event</button>
+              <button class="yt-mini-chip ${chatScope === 'persistent' ? 'active' : ''}" type="button" id="chipScopeRule">📜 Rule</button>
+            </div>
+            <div class="yt-delivery-group">
+              <button class="yt-mini-chip ${chatDelivery === 'after_buffer' ? 'active' : ''}" type="button" id="chipDeliveryBuffer" title="Zero disruption — existing buffer continues">⏱️ Buffer</button>
+              <button class="yt-mini-chip ${chatDelivery === 'next_unrendered' ? 'active' : ''}" type="button" id="chipDeliveryFast" title="Fast replan on next unrendered scene">⚡ Fast</button>
+            </div>
+          </div>
+          <div class="yt-consequence-hint" id="chatConsequenceHint">${getConsequenceHint()}</div>
+          <div class="yt-chat-input-box">
+            <textarea class="yt-chat-input" id="chatInput" placeholder="${
+              chatScope === 'audience_message' ? 'Ask host a question or speak…' : chatScope === 'persistent' ? 'Add lasting world rule…' : 'Direct next scene event…'
+            }"></textarea>
+            <button class="yt-chat-send-btn" id="btnSendChat" type="button">Send</button>
+          </div>
         </div>
       </div>
     `;
@@ -343,22 +389,65 @@
     const items = (state?.live_directives || []).filter((i) => ['pending', 'active'].includes(i.status));
 
     if (!items.length) {
-      list.innerHTML = `<div style="color:var(--yt-text-muted);font-size:12px;text-align:center;padding:24px 0;">No active directives. Type below to direct upcoming scenes.</div>`;
+      list.innerHTML = `<div style="color:var(--yt-text-muted);font-size:12px;text-align:center;padding:20px 0;">No active directives yet.<br>Choose a type above and send to steer the living story.</div>`;
     } else {
       items.forEach((item) => {
         const msg = document.createElement('div');
         msg.className = 'yt-chat-msg';
+        const isRule = item.scope === 'persistent';
+        const isEvent = item.scope === 'next_scene';
+        const isChat = item.scope === 'audience_message';
+        const scopeBadge = isChat ? 'Chat' : isRule ? 'Rule' : 'Event';
+        const scopeClass = isRule ? 'rule' : isEvent ? 'event' : '';
+        const timingLabel = item.delivery === 'next_unrendered' ? 'Fast' : `Scene #${item.activation_scene || '?'}`;
+
         msg.innerHTML = `
-          <div class="yt-chat-avatar">👤</div>
-          <div>
-            <span class="yt-chat-badge">${item.scope === 'audience_message' ? 'Chat' : item.scope === 'persistent' ? 'Rule' : 'Event'}</span>
-            <span class="yt-chat-author">Viewer</span>
-            <span>${esc(item.text)}</span>
+          <div class="yt-chat-avatar">${isChat ? '💬' : isRule ? '📜' : '⚡'}</div>
+          <div class="yt-chat-content">
+            <div class="yt-chat-header-row">
+              <span class="yt-chat-badge ${scopeClass}">${scopeBadge}</span>
+              <span class="yt-chat-timing-badge">${timingLabel}</span>
+              <span class="yt-chat-author">Viewer</span>
+              ${isRule && item.status === 'active' ? `<button class="yt-chat-remove-btn" data-id="${item.id}" type="button">✕ Remove</button>` : ''}
+            </div>
+            <div class="yt-chat-text">${esc(item.text)}</div>
           </div>
         `;
         list.appendChild(msg);
       });
     }
+
+    // Attach Remove Listeners
+    list.querySelectorAll('.yt-chat-remove-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeDirective(btn.dataset.id);
+      });
+    });
+
+    // Scope chip events
+    $('chipScopeChat')?.addEventListener('click', () => {
+      chatScope = 'audience_message';
+      renderLiveChat();
+    });
+    $('chipScopeEvent')?.addEventListener('click', () => {
+      chatScope = 'next_scene';
+      renderLiveChat();
+    });
+    $('chipScopeRule')?.addEventListener('click', () => {
+      chatScope = 'persistent';
+      renderLiveChat();
+    });
+
+    // Delivery chip events
+    $('chipDeliveryBuffer')?.addEventListener('click', () => {
+      chatDelivery = 'after_buffer';
+      renderLiveChat();
+    });
+    $('chipDeliveryFast')?.addEventListener('click', () => {
+      chatDelivery = 'next_unrendered';
+      renderLiveChat();
+    });
 
     $('btnSendChat')?.addEventListener('click', sendDirectFromChat);
     $('chatInput')?.addEventListener('keydown', (e) => {
@@ -367,6 +456,21 @@
         sendDirectFromChat();
       }
     });
+  }
+
+  async function removeDirective(directiveId) {
+    if (!activeId || !directiveId) return;
+    try {
+      const r = await fetch(`/api/theater/${activeId}/directives/${directiveId}`, {
+        method: 'DELETE',
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Could not remove directive');
+      renderState(data);
+      toast('World rule removed');
+    } catch (e) {
+      toast(e.message);
+    }
   }
 
   async function sendDirectFromChat() {
@@ -380,13 +484,16 @@
       const r = await fetch(`/api/theater/${activeId}/directives`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, scope: 'next_scene', delivery: 'after_buffer' }),
+        body: JSON.stringify({ text, scope: chatScope, delivery: chatDelivery }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Could not send directive');
       input.value = '';
       renderState(data);
-      toast('Direction queued for upcoming scene');
+      const toastMsg = chatDelivery === 'after_buffer'
+        ? `Queued from scene ${data.live_directives?.slice(-1)[0]?.activation_scene || 'ahead'}`
+        : 'Fast steering triggered on next unrendered scene';
+      toast(toastMsg);
     } catch (e) {
       toast(e.message);
     } finally {
