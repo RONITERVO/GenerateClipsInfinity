@@ -15,9 +15,23 @@ This repository contains the application code only. Model weights, Wikipedia arc
 - **Optional Educational Grounding**: Local Kiwix ZIM archives provide verified facts for educational adventures.
 - **Durable Archives**: Made from ordinary JSON, MP4, WAV, SRT, and M3U8 files.
 
+## System Requirements
+
+To avoid wasted time installing models that cannot run, verify that your PC meets the following hardware requirements:
+
+| Component | Minimum Specification | Recommended Specification | Why It's Needed |
+| :--- | :--- | :--- | :--- |
+| **GPU (VRAM)** | **12 GB VRAM**<br>(e.g. RTX 3060 12GB, RTX 4070 12GB, RTX 5070 12GB) | **16 GB – 24 GB VRAM**<br>(e.g. RTX 4080 / 4090 / 5080 / 5090) | **Wan 2.2 Text-to-Video** requires ~11–12 GB VRAM for 480×272 generation. Cards with <12 GB will trigger VRAM Out-of-Memory (OOM). |
+| **System RAM** | **32 GB RAM** | **64 GB RAM** (DDR4 / DDR5) | **Gemma 4 E4B** context + **Python runtime** + **ComfyUI model caches** peak at ~28–35 GB total system memory usage. |
+| **CPU** | **8-Core modern CPU**<br>(e.g. Ryzen 7 5700X / Core i7-12700K) | **16-Core modern CPU**<br>(e.g. Ryzen 9 7950X / 9950X or i9-13900K/14900K) | Runs continuous **Gemma 4 LLM** planning (`llama-server`) and **Supertonic 3 TTS** synthesis concurrently with video rendering. |
+| **Storage** | **100 GB free space on NVMe SSD** | **200+ GB NVMe SSD** | Model weights (~35 GB for Wan + Gemma + Supertonic) + local Wikipedia archives (~10–40 GB) + high-speed video scene streaming. |
+| **Operating System** | **Windows 10 / 11 (64-bit)** | **Windows 11 (64-bit)** | Native Windows Python 3.13, PyTorch CUDA 12.8+, FFmpeg on PATH. |
+
+---
+
 ## Tested hardware and performance
 
-The reference system is Windows 11 with a Ryzen 9 7950X, 64 GB RAM, and an NVIDIA RTX 5070 12 GB.
+The reference test system is Windows 11 with a Ryzen 9 7950X (16 cores), 64 GB RAM, and an NVIDIA RTX 5070 12 GB.
 
 For the measured end-to-end baseline, current bottleneck analysis, telemetry limitations, and a reproducible tuning procedure, see [`PERFORMANCE.md`](PERFORMANCE.md). The figures below describe this reference machine and are not universal performance guarantees.
 
