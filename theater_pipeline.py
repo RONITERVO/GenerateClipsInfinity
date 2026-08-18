@@ -1629,9 +1629,8 @@ class TheaterManager:
             f"Recent scenes: {json.dumps(prior, ensure_ascii=False)}\n"
             f"Write every natural-language value only in {language_name}; do not switch to English. "
             f"Create scene {number} with {request_minimum}-{request_maximum} source-language narration words. "
-            f"This is a hard playback-duration budget: use exactly {sentence_count} complete sentences, make every "
-            f"sentence contain {sentence_minimum}-{sentence_maximum} words and advance the action, and do not use "
-            "recap or filler to reach the range. "
+            f"This is a hard playback-duration budget: use about {sentence_count} complete sentences ({sentence_minimum}-{sentence_maximum} words each), "
+            "make every sentence advance the action, and do not use recap or filler to reach the range. "
             f"{progression_contract}"
             "Replace story_summary with a compact current-state summary of at most "
             "250 words; never append a scene transcript. Keep the JSON compact and do not add fields. "
@@ -1667,11 +1666,10 @@ class TheaterManager:
             raise TheaterError(f"The local writer's scene {number} is missing required story fields.")
         narration_words = spoken_word_count(scene["narration"], language)
         narration_sentences = split_narration_sentences(scene["narration"])
-        if len(narration_sentences) != sentence_count:
-            raise TheaterError(
-                f"the local writer returned {len(narration_sentences)} narration sentences; "
-                f"the duration plan requires {sentence_count}"
-            )
+        if not narration_sentences:
+            raise TheaterError(f"The local writer's scene {number} contains no speakable narration sentences.")
+        if len(narration_sentences) > 48:
+            raise TheaterError(f"The local writer returned too many narration sentences ({len(narration_sentences)}) for scene {number}.")
         configured_minimum, configured_maximum = self.narration_word_limits(state["config"])
         safety_minimum = max(8, math.floor(configured_minimum * 0.70))
         safety_maximum = math.ceil(configured_maximum * 1.30)
