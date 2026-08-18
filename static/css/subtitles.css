@@ -1,0 +1,149 @@
+/**
+ * ============================================================================
+ * YOUTUBE-INSPIRED REAL-TIME DRAGGABLE SUBTITLES (subtitles.css)
+ * ============================================================================
+ * Artists can customize:
+ * - Subtitle font size, color, background transparency, and blur.
+ * - Bilingual paired translation layout and highlights.
+ * - Drag handle indicators and hover controls.
+ * ============================================================================
+ */
+
+.caption-overlay {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  max-width: 86%;
+  width: auto;
+  min-width: 280px;
+  background: var(--caption-bg);
+  backdrop-filter: var(--caption-blur);
+  -webkit-backdrop-filter: var(--caption-blur);
+  border: var(--caption-border);
+  border-radius: var(--caption-radius);
+  box-shadow: var(--caption-shadow);
+  padding: 12px 18px 14px;
+  user-select: none;
+  cursor: grab;
+  transition: box-shadow var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-normal);
+  touch-action: none;
+}
+
+.caption-overlay:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(56, 189, 248, 0.25);
+}
+
+.caption-overlay.dragging {
+  cursor: grabbing;
+  opacity: 0.95;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 0 2px var(--color-brand-primary);
+  transition: none;
+}
+
+/* Drag Grab Bar Indicator */
+.caption-drag-handle {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: -6px auto 8px;
+  height: 10px;
+  width: 44px;
+  cursor: grab;
+}
+
+.caption-drag-pill {
+  width: 32px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-pill);
+  transition: background var(--transition-fast), width var(--transition-fast);
+}
+
+.caption-overlay:hover .caption-drag-pill {
+  background: var(--color-brand-primary);
+  width: 38px;
+}
+
+/* Quick Tools Toolbar on Hover */
+.caption-tools {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-fast);
+}
+
+.caption-overlay:hover .caption-tools {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.caption-tool-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 0;
+  color: var(--text-secondary);
+  border-radius: var(--radius-xs);
+  padding: 3px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.caption-tool-btn:hover {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+/* Real-Time Subtitle Content */
+.caption-body {
+  font-family: var(--font-family-body);
+  font-size: var(--caption-font-size);
+  font-weight: var(--caption-font-weight);
+  line-height: var(--caption-line-height);
+  color: var(--caption-text-color);
+  text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  word-break: break-word;
+}
+
+/* Bilingual Paired Sentences */
+.caption-bilingual-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: center;
+}
+
+.caption-original {
+  color: var(--caption-text-color);
+  font-size: var(--caption-font-size);
+}
+
+.caption-translation {
+  color: var(--caption-translation-color);
+  font-size: calc(var(--caption-font-size) - 1.5px);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.caption-badge {
+  display: inline-block;
+  font-family: var(--font-family-display);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--caption-tag-bg);
+  color: var(--caption-tag-color);
+}

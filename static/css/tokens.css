@@ -1,0 +1,99 @@
+/**
+ * ============================================================================
+ * ENDLESS THEATER DESIGN TOKENS (tokens.css)
+ * ============================================================================
+ * Designed for visual artists and stylists:
+ * To customize the look, colors, subtitle styles, and ambiance of the app,
+ * simply edit the CSS variables below! No JavaScript or Python code needed.
+ * ============================================================================
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* --------------------------------------------------------------------------
+   * 1. CORE THEME & ACCENT PALETTE (Google DeepMind / Material 3 Dark)
+   * -------------------------------------------------------------------------- */
+  --color-brand-primary: #38bdf8;        /* Vivid Sky/Cyan primary accent */
+  --color-brand-secondary: #818cf8;      /* Indigo/Violet companion glow */
+  --color-brand-gradient: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+  --color-brand-glow: rgba(56, 189, 248, 0.25);
+
+  /* Semantic status colors */
+  --color-accent-cyan: #38bdf8;          /* Active stream / Highlights */
+  --color-accent-violet: #a78bfa;        /* Neural writer / Story generation */
+  --color-accent-amber: #fbbf24;         /* Telemetry / Buffer warning */
+  --color-accent-green: #34d399;         /* Safe buffer / Ready state */
+  --color-accent-red: #f87171;           /* Danger / Stop / Low buffer */
+
+  /* --------------------------------------------------------------------------
+   * 2. BACKGROUNDS & SURFACES (Minimalist Studio Dark)
+   * -------------------------------------------------------------------------- */
+  --bg-app: #08090d;                     /* Deep matte obsidian base */
+  --bg-app-radial: radial-gradient(circle at 15% -10%, rgba(56, 189, 248, 0.08), transparent 40rem),
+                   radial-gradient(circle at 85% -10%, rgba(129, 140, 248, 0.08), transparent 45rem),
+                   #08090d;
+
+  --surface-card: rgba(17, 20, 29, 0.85); /* Frosted card surface */
+  --surface-card-hover: rgba(22, 26, 38, 0.92);
+  --surface-card-blur: blur(24px);
+  --surface-inset: rgba(9, 11, 17, 0.8);
+  --surface-elevated: rgba(26, 31, 46, 0.95);
+
+  /* Borders & Dividers */
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-focus: rgba(56, 189, 248, 0.6);
+  --border-glow: 0 0 0 3px rgba(56, 189, 248, 0.15);
+
+  /* --------------------------------------------------------------------------
+   * 3. TYPOGRAPHY & TEXT HIERARCHY
+   * -------------------------------------------------------------------------- */
+  --font-family-display: "Outfit", "Google Sans", system-ui, -apple-system, sans-serif;
+  --font-family-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-family-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  --font-family-serif: "Newsreader", "Georgia", serif;
+
+  --text-primary: #f8fafc;              /* Ultra-crisp title & body text */
+  --text-secondary: #94a3b8;            /* Subtitles, labels, descriptions */
+  --text-muted: #64748b;                /* Dim metadata, hints */
+  --text-inverse: #030712;              /* Text on bright buttons */
+
+  /* --------------------------------------------------------------------------
+   * 4. YOUTUBE-INSPIRED REAL-TIME SUBTITLES (DRAGGABLE OVERLAY)
+   * -------------------------------------------------------------------------- */
+  --caption-bg: rgba(9, 10, 15, 0.88);  /* Semi-transparent caption chip */
+  --caption-blur: blur(16px);
+  --caption-border: 1px solid rgba(255, 255, 255, 0.12);
+  --caption-shadow: 0 12px 36px rgba(0, 0, 0, 0.65), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --caption-radius: 14px;
+  --caption-text-color: #ffffff;
+  --caption-font-size: 16px;
+  --caption-font-weight: 500;
+  --caption-line-height: 1.5;
+  --caption-translation-color: #67e8f9;  /* Cyan subtitle translation */
+  --caption-tag-color: #94a3b8;
+  --caption-tag-bg: rgba(255, 255, 255, 0.08);
+
+  /* --------------------------------------------------------------------------
+   * 5. SQUIRCLES & ELEVATION RADIUSES (Google Material 3 / Apple)
+   * -------------------------------------------------------------------------- */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --radius-pill: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 12px 28px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --shadow-stage: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 32px 80px rgba(0, 0, 0, 0.8);
+
+  /* --------------------------------------------------------------------------
+   * 6. MOTION & TRANSITION TIMINGS
+   * -------------------------------------------------------------------------- */
+  --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-smooth: 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
