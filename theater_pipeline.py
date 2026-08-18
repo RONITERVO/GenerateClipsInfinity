@@ -1904,9 +1904,11 @@ class TheaterManager:
         ffprobe = shutil.which("ffprobe")
         if not ffprobe:
             raise TheaterError("FFprobe is required for theater synchronization.")
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         process = await asyncio.create_subprocess_exec(
             ffprobe, "-v", "error", "-show_entries", "format=duration",
             "-of", "csv=p=0", str(path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=creationflags,
         )
         out, _ = await process.communicate()
         if process.returncode:
@@ -1914,9 +1916,13 @@ class TheaterManager:
         return float(out.decode().strip())
 
     async def _run_ffmpeg(self, args: list[str], log_path: Path) -> None:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         for attempt in range(1, 3):
             with log_path.open("ab") as log:
-                process = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log)
+                process = await asyncio.create_subprocess_exec(
+                    *args, stdout=log, stderr=log,
+                    creationflags=creationflags,
+                )
                 try:
                     code = await process.wait()
                 except asyncio.CancelledError:

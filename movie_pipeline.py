@@ -538,10 +538,12 @@ class MovieManager:
         ffmpeg = shutil.which("ffmpeg")
         if not ffprobe or not ffmpeg:
             return {"warning": "FFmpeg diagnostics unavailable"}
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         probe = await asyncio.create_subprocess_exec(
             ffprobe, "-v", "error", "-select_streams", "v:0", "-count_frames",
             "-show_entries", "stream=nb_read_frames,avg_frame_rate,duration",
             "-of", "json", str(path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=creationflags,
         )
         stdout, _ = await probe.communicate()
         data = json.loads(stdout.decode() or "{}") if probe.returncode == 0 else {}
@@ -549,6 +551,7 @@ class MovieManager:
         hashes = await asyncio.create_subprocess_exec(
             ffmpeg, "-v", "error", "-i", str(path), "-map", "0:v:0", "-f", "framemd5", "-",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=creationflags,
         )
         hash_out, _ = await hashes.communicate()
         lines = [line for line in hash_out.decode(errors="replace").splitlines() if line and not line.startswith("#")]
@@ -564,18 +567,24 @@ class MovieManager:
         }
 
     async def _run_process(self, args: list[str], log_path: Path) -> None:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         with log_path.open("ab") as log:
-            process = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log)
+            process = await asyncio.create_subprocess_exec(
+                *args, stdout=log, stderr=log,
+                creationflags=creationflags,
+            )
             code = await process.wait()
         if code:
             tail = log_path.read_text(encoding="utf-8", errors="replace")[-3000:]
             raise MovieError(f"FFmpeg failed with exit code {code}.\n{tail}")
 
     async def _duration(self, ffprobe: str, path: Path) -> float:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         process = await asyncio.create_subprocess_exec(
             ffprobe, "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=creationflags,
         )
         stdout, _ = await process.communicate()
         if process.returncode:
@@ -662,10 +671,12 @@ class MovieManager:
         return ",".join(f"atempo={value:.6f}" for value in values)
 
     async def _video_frame_count(self, ffprobe: str, path: Path) -> int:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         process = await asyncio.create_subprocess_exec(
             ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0",
             "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=creationflags,
         )
         stdout, _ = await process.communicate()
         if process.returncode:

@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -84,6 +86,41 @@ class PromptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             calls = asyncio.run(exercise(Path(directory) / "ffmpeg.log"))
         self.assertEqual(calls, 1)
+
+    def test_theater_ffmpeg_and_duration_pass_no_window_creationflags(self):
+        class Process:
+            def __init__(self, output=b"1.234\n"):
+                self.output = output
+                self.returncode = 0
+            async def wait(self):
+                return 0
+            async def communicate(self):
+                return self.output, b""
+
+        async def exercise_ffmpeg(log_path):
+            manager = TheaterManager.__new__(TheaterManager)
+            with patch(
+                "theater_pipeline.asyncio.create_subprocess_exec", return_value=Process(),
+            ) as create:
+                await manager._run_ffmpeg(["ffmpeg", "-version"], log_path)
+                return create.call_args
+
+        async def exercise_duration():
+            manager = TheaterManager.__new__(TheaterManager)
+            with patch(
+                "theater_pipeline.asyncio.create_subprocess_exec", return_value=Process(),
+            ) as create, patch("theater_pipeline.shutil.which", return_value="ffprobe"):
+                duration = await manager._duration(Path("dummy.mp4"))
+                return duration, create.call_args
+
+        with tempfile.TemporaryDirectory() as directory:
+            call_args = asyncio.run(exercise_ffmpeg(Path(directory) / "ffmpeg.log"))
+            expected_flag = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            self.assertEqual(call_args.kwargs.get("creationflags"), expected_flag)
+
+        duration, dur_call_args = asyncio.run(exercise_duration())
+        self.assertEqual(duration, 1.234)
+        self.assertEqual(dur_call_args.kwargs.get("creationflags"), expected_flag)
 
     def test_movie_shutdown_marks_active_work_resumable(self):
         async def exercise():
