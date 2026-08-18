@@ -1,21 +1,19 @@
-# Wan Video Studio
+# Wan Endless Learning Stream
 
-A Windows-first, fully local interface for Wan 2.2 video generation, one-sentence movie production, and an endless narrated story theater. After the models are installed, generation uses no cloud API, account, analytics, or telemetry.
+A Windows-first, fully local interface for an endless narrated story theater powered by Wan 2.2, Gemma 4 E4B, and Supertonic 3. After the models are installed, generation uses no cloud API, account, analytics, or telemetry. The application is served directly at `http://127.0.0.1:7868/`.
 
 This repository contains the application code only. Model weights, Wikipedia archives, generated media, and third-party runtimes are intentionally excluded.
 
 ## Features
 
-- Single Wan 2.2 text-to-video clips with the tested two-stage LightX2V workflow.
-- One-sentence movie planning, progressive generation, editable per-clip timing, subtitles, EDL, CSV shot list, and final MP4 export.
-- Endless offline theater with a bounded Gemma GPU opening burst, Gemma/Supertonic sustaining work on CPU, and Wan rendering on the GPU.
-- Endless Dream mode: a one-word pre-sleep cue becomes an entirely invented, ungrounded stream of evolving imagery.
-- Interactive character show mode: a stable resident host continues an activity, receives delayed viewer chat or decisions, and answers in later synchronized scenes.
-- Live world direction during Endless Theater: inject a one-scene event or a persistent future rule without replacing completed media.
-- Optional bilingual language-learning playback: every story sentence is displayed and spoken first in the selected story language and then in the learner's translation language.
-- Progressive playback: completed scenes appear while later scenes are still being planned and generated.
-- Optional fail-closed educational grounding from local Kiwix ZIM archives.
-- Durable projects made from ordinary JSON, MP4, WAV, SRT, CSV, EDL, and M3U8 files.
+- **Endless Offline Theater**: A resident story world that writes, speaks, moves, and archives itself at `http://127.0.0.1:7868/`.
+- **Endless Dream Mode**: A one-word pre-sleep cue becomes an entirely invented, ungrounded stream of evolving imagery.
+- **Interactive Character Show**: A stable resident host continues an activity, receives delayed viewer chat or decisions, and answers in later synchronized scenes.
+- **Live World Direction**: Inject a one-scene event or a persistent future rule without replacing completed media.
+- **Bilingual Language-Learning Playback**: Every story sentence is displayed and spoken first in the selected story language and then in the learner's translation language.
+- **Progressive Playback**: Completed scenes appear while later scenes are still being planned and generated.
+- **Optional Educational Grounding**: Local Kiwix ZIM archives provide verified facts for educational adventures.
+- **Durable Archives**: Made from ordinary JSON, MP4, WAV, SRT, and M3U8 files.
 
 ## Tested hardware and performance
 
@@ -26,7 +24,7 @@ For the measured end-to-end baseline, current bottleneck analysis, telemetry lim
 - Gemma 4 E4B Q4_K_M: 15.31 output tokens/second and 146.73 prompt tokens/second at 8 CPU threads; about 4.62 GiB resident RAM.
 - Live Theater planning: 13.29 output tokens/second with the video and speech services available.
 - Supertonic 3: approximately 0.20 real-time factor in the measured narration test.
-- **Cinema preview (`480 x 272 / 81 frames / 16 FPS`) is the user-tested Theater default on this PC.** There is no preset selector. Advanced custom generation exposes width, height, source frames, playback FPS, narration word limits, maximum slow-motion, and seed. Saved sessions created by older versions retain their original render settings.
+- **Cinema preview (`480 x 272 / 81 frames / 16 FPS`) is the user-tested Theater default on this PC.** Advanced custom generation exposes width, height, source frames, playback FPS, narration word limits, maximum slow-motion, and seed. Saved sessions created by older versions retain their original render settings.
 
 ## Required local components
 
@@ -60,10 +58,6 @@ The required instruction-tuned model is derived from [`google/gemma-4-E4B-it`](h
 
 Supertonic 3 is expected at `D:\LocalAI\Supertonic3`. Pure story mode needs Gemma, Supertonic, ComfyUI, Wan, and FFmpeg. Educational modes additionally require Kiwix tools and English Simple Wikipedia or Finnish Wikipedia ZIM archives under `D:\LocalAI\OfflineWikipedia\archives`.
 
-### Movie editor
-
-The one-sentence movie planner expects Bonsai 27B at `D:\LocalAI\Bonsai27B`. Narration uses the installed ComfyUI `ChatterboxTTS` node. These are not required for single clips or Pure story Theater.
-
 ## ComfyUI models
 
 The backend uses ComfyUI's **Text to Video (Wan 2.2)** graph with:
@@ -78,13 +72,13 @@ Sampling stays at the validated blueprint values. The application changes only u
 ## Installation
 
 ```powershell
-git clone <your-repository-url> Wan-Video-UI
-cd Wan-Video-UI
+git clone <your-repository-url> Wan-endless-learning-stream
+cd Wan-endless-learning-stream
 python -m pip install -r requirements.txt
 python app.py
 ```
 
-On the tested layout, `Start Wan Video UI.cmd` uses ComfyUI's virtual-environment Python. `Launch Wan Video UI.vbs` starts the application hidden and opens `http://127.0.0.1:7868`.
+On the tested layout, `Start Wan Video UI.cmd` uses ComfyUI's virtual-environment Python. `Launch Wan Video UI.vbs` starts the application hidden, waits for server readiness, and opens `http://127.0.0.1:7868`.
 
 The launchers inherit `WAN_*` environment variables. `.env.example` is a reference file; the application does not silently load `.env` files.
 
@@ -97,10 +91,9 @@ The launchers inherit `WAN_*` environment variables. `.env.example` is a referen
 | `WAN_COMFY_ROOT` | `D:\AI\ComfyUI` | ComfyUI installation |
 | `WAN_GEMMA4_ROOT` | `D:\LocalAI\Gemma4E4B` | Gemma model and llama.cpp runtime |
 | `WAN_LLAMA_RUNTIME_ROOT` | same as `WAN_GEMMA4_ROOT` | Optional separate llama.cpp runtime |
-| `WAN_CUDA_LLAMA_RUNTIME_ROOT` | `D:\LocalAI\Bonsai27B` | Optional CUDA-enabled llama.cpp runtime used only for bounded Gemma buffer bursts |
+| `WAN_CUDA_LLAMA_RUNTIME_ROOT` | `D:\LocalAI\Bonsai27B` | Optional CUDA-enabled llama.cpp runtime used for bounded Gemma buffer bursts |
 | `WAN_SUPERTONIC_ROOT` | `D:\LocalAI\Supertonic3` | Offline neural speech service |
 | `WAN_KIWIX_ROOT` | `D:\LocalAI\OfflineWikipedia` | Optional educational sources |
-| `WAN_BONSAI_ROOT` | `D:\LocalAI\Bonsai27B` | Optional movie planner |
 | `WAN_COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI HTTP/WebSocket endpoint |
 | `WAN_OUTPUT_ROOT` | `<ComfyUI>\output` | Generated-project root |
 | `WAN_HOST` | `127.0.0.1` | Application bind address |
@@ -108,105 +101,47 @@ The launchers inherit `WAN_*` environment variables. `.env.example` is a referen
 | `WAN_PYTHON_EXE` | ComfyUI venv Python | Visible CMD launcher only |
 | `WAN_PYTHONW_EXE` | ComfyUI venv PythonW | Hidden VBS launcher only |
 
-Example for the current PowerShell session:
-
-```powershell
-$env:WAN_COMFY_ROOT = "E:\ComfyUI"
-$env:WAN_GEMMA4_ROOT = "E:\Models\Gemma4E4B"
-python app.py
-```
-
 ## Output directories
 
 Under `WAN_OUTPUT_ROOT`:
 
-- `wan_ui` contains single clips;
-- `wan_movies` contains editable movie projects;
-- `wan_theater` contains saved endless-story sessions.
-
-Movie projects retain the original request, screenplay plan, versioned `project.json`, source shots, narration, logs, rendered segments, final MP4, subtitles, shot-list CSV, and EDL. Rebuilding an edit reuses source assets and does not rerun Wan.
+- `wan_theater` contains saved endless-story sessions (playlists, video segments, narration WAVs, and archive JSON).
 
 ## Theater synchronization
 
-Gemma planning, Supertonic speech, Wan rendering, and FFmpeg assembly overlap. Playback waits for synchronized media rather than speaking over a missing visual. The editor first stretches unique forward motion; if narration remains longer, it uses forward/backward coverage instead of silently freezing most of the scene.
+Gemma planning, Supertonic speech, Wan rendering, and FFmpeg assembly overlap. Playback waits for synchronized media rather than speaking over a missing visual. The synchronizer first stretches unique forward motion; if narration remains longer, it uses forward/backward coverage instead of silently freezing most of the scene.
 
-The live duration controller measures the interval between fully archived scenes, learns the actual seconds per spoken word and bilingual expansion ratio for the selected languages and voice, and targets 1.08× playback coverage inside the configured word budget. Gemma's sentence plan and a broad safe duration envelope are validated without retrying ordinary language-dependent word variation. Supertonic remains within a natural 0.96–1.05 speed range and changes pace only for the residual duration error; pacing is not randomized. The synchronization graph performs interpolation, forward/reverse coverage, encoding, and audio muxing in one FFmpeg pass, avoiding repeated lossy H.264 encodes.
-
-The ordinary story experiences store a structured cast, world, visual style, binding premise contract, and continuity rules. Explicit character counts, objects, actions, threats, and settings in those prompts are treated as non-negotiable. Dream mode intentionally uses a different seed contract described below.
+The live duration controller measures the interval between fully archived scenes, learns the actual seconds per spoken word and bilingual expansion ratio for the selected languages and voice, and targets 1.08× playback coverage inside the configured word budget. Gemma's sentence plan and a broad safe duration envelope are validated without retrying ordinary language-dependent word variation. Supertonic remains within a natural 0.96–1.05 speed range and changes pace only for the residual duration error; pacing is not randomized. The synchronization graph performs interpolation, forward/reverse coverage, encoding, and audio muxing in one FFmpeg pass without console window popups.
 
 ### Endless Dream
 
 Choose **Endless dream** and enter a faint cue such as `velvet`, `warm rain`, or `blue door`. The cue is deliberately not treated as a request specification or factual topic. Gemma uses it once as a loose association, invents the people, places, objects, histories and internal rules, and begins inside an unfolding image rather than defining the word or announcing a dream.
 
-Dream mode never starts Kiwix, ignores any submitted learning focus, omits encyclopedia text from both bootstrap and scene-planning prompts, bypasses factual review, and deterministically removes learning points and sources from generated scenes. If a cue names a real person, place or object, the writing contract asks Gemma to transform it into an original fictional image instead of making claims about the real subject. This is prompt-level isolation, not a claim that a pretrained language model can forget its training data; avoiding recognizable real-world facts is strongly requested and factual UI fields are stripped, but model priors cannot be mathematically erased.
-
-Continuity is associative rather than random. Recurring sensory motifs and enough local identity connect adjacent scenes, while meaningful impossible transformations are allowed. Wan still receives one coherent, filmable action per clip so the dream remains watchable instead of becoming an incoherent prompt collage. Translation, synchronized speech, archives, live delayed whispers, duration control and the existing Gemma/Wan resource schedule work exactly as in Pure Story; Dream adds no model or inference stage.
-
 ### Live world direction
 
-While a Theater session is open, **Direct the world while it runs** accepts either a one-scene event or a persistent world rule. The default **After planned buffer** timing reserves the first scene after Gemma's completed plans and any planning request already in flight. It does not cancel planning or translation, discard prepared narration, rebuild queues, interrupt rendering, or manufacture a GPU gap. The UI shows the reserved scene number, so a busy buffer can intentionally delay the result.
-
-The optional **Next unrendered** timing is for people who prefer responsiveness over preserving speculative work. A one-scene event is consumed exactly once; a persistent rule remains visible and removable. Each add, activation, application, and removal is recorded in `logs/live_directives.jsonl`, while current directive state is stored in `session.json` and `archive.json` for offline resume.
-
-This is deliberately not described as a real-time world model. Gemma plans symbolic scene state, Wan renders one clip at a time, Supertonic speaks it, and FFmpeg assembles it. Control latency is therefore either **after the planned buffer** or at the next **unrendered scene**, not the next frame. A visual already rendering is allowed to finish, and completed MP4/WAV assets are never deleted or rewritten by steering.
-
-To make fast steering reliable, every new speculative plan carries a causal-state checkpoint. When fast input arrives, the planner and translator stop at a safe await boundary, the app restores the checkpoint before the first unrendered plan, drops only that speculative text suffix, and rebuilds its bounded queues. Rolling story summary, structured continuity memory, compaction boundary, and one-shot directive status move together. Older saved buffers without these checkpoints remain playable and apply the direction after their existing buffer rather than guessing at a rollback. Delayed steering never enters this rollback path.
-
-The design follows the useful interaction vocabulary of modern world-model research—persistent environments plus promptable events—without requiring a new experimental model or claiming frame-level simulation. See Google DeepMind's [Genie model overview](https://deepmind.google/models/genie/) and [prompt guide](https://deepmind.google/models/genie/prompt-guide/) for the distinction. On this hardware, event-sourced scene steering is the maintainable option: it adds negligible VRAM use, preserves the measured Gemma/Wan resource split, survives restart, and can later drive another planner or renderer through the same directive API.
+While a Theater session is open, **Direct the world while it runs** accepts either a one-scene event or a persistent world rule. The default **After planned buffer** timing reserves the first scene after Gemma's completed plans and any planning request already in flight. The optional **Next unrendered** timing is for people who prefer responsiveness over preserving speculative work.
 
 ### Interactive character show
 
-Choose **Interactive character show** to create a recurring on-screen host, recognizable setting, and ongoing activity instead of an ordinary narrated cast. The opening introduces the host and invites delayed participation. While it runs, the live panel offers three distinct inputs:
-
-- **Chat message to host** is a single conversational turn. At its reserved scene, the host acknowledges the message's actual meaning and answers aloud rather than treating every question as a physical command.
-- **One-scene event** lets the viewer decide a later moment in the host's day or story.
-- **Persistent world rule** changes all eligible future scenes until removed.
-
-All three default to the non-disruptive delayed queue. Chat is stored immediately but excluded from Gemma prompts until its reserved scene, so it adds no inference pass and does not cancel planning, translation, speech preparation, or video generation. The archive connects each generated segment to the directive IDs it answered, and `live_directives.jsonl` preserves the complete input/application transcript.
-
-This mode deliberately uses the installed Pure Story resources: Gemma 4 E4B for the character and reply, Supertonic for speech, Wan for a newly generated visual, and the existing FFmpeg synchronizer. It does not require a microphone, speech recognition, WebRTC, a cloud avatar service, or another resident model. This keeps it fully offline and gives it the same sustained throughput as Pure Story apart from a small bounded prompt addition when a message becomes eligible.
-
-It is not a lip-synchronized real-time avatar. Wan text-to-video identity consistency is best-effort even with the fixed character bible, recurring appearance prompt, and host-oriented framing. A message is answered at a scene boundary only after its matching visual and audio are complete. This is closer to a deliberately delayed “chat decides what happens” show than a video call, which is the honest long-term interaction model for the current RTX 5070 pipeline.
-
-Language learning remains available without a separate path. Select a story language and a translation language before starting; every host sentence—including answers to viewer chat—is displayed and spoken in the original language followed by its translation, inside the same total speech-duration budget.
+Choose **Interactive character show** to create a recurring on-screen host, recognizable setting, and ongoing activity. Viewers can send chat messages to the host, inject one-scene events, or set persistent rules.
 
 ### Language-learning mode
 
 Choose the language of the story under **Narration language**, then choose a different **Language-learning translation**. Gemma keeps the story itself in the first language and produces a validated one-to-one translation for every sentence. The Theater UI displays the paired sentences and Supertonic speaks each original sentence immediately followed by its translation.
 
-The Cinema preview default is 80–110 total spoken words per clip. The Advanced minimum and maximum values use the same total-spoken-word definition. When translation is enabled, the planner reduces source prose before generation, then learns the measured source-to-translation expansion ratio. Completed-scene cadence and actual narration duration select the required part of the budget. The sentence count is validated, gross duration-envelope misses use the existing bounded repair path, and normal language-dependent word variation is preserved. This keeps bilingual scenes close to the generation cadence instead of doubling them or disguising a short scene with arbitrarily slow speech.
-
-At startup, the Theater capability-checks `WAN_CUDA_LLAMA_RUNTIME_ROOT` for both `llama-server.exe` and `ggml-cuda.dll`. When available, it waits for earlier ComfyUI work to finish, explicitly unloads ComfyUI models, and runs the same required Gemma model in a bounded two-slot CUDA burst on a separate local port. The burst creates at least three fully validated, sentence-aligned scenes and then synchronously terminates the CUDA process before Wan is allowed to start. It never substitutes a different language model. If CUDA startup or structured generation fails, the failure is archived in session metrics and startup continues with the same Gemma model on CPU.
-
-After the opening buffer is ready, Gemma uses two bounded CPU request slots: one can plan the next source scene while the other produces the current scene's validated sentence translations. Each CPU or GPU slot retains a 16K context ceiling. The separate translation gate still fails closed on missing, reordered, combined, or split sentences; concurrency does not weaken archive or TTS alignment. Resumed sessions reuse every already-prepared scene and only burst when fewer than three unrendered prepared scenes remain.
-
-The sustaining pipeline does not swap models on a timer. It tracks CPU planner and translation cycle EMAs plus live request age. Only when the translated queue is empty and the predicted wait is at least 12 seconds and at least 75% of the machine's measured three-scene GPU-burst cost does it use the otherwise idle GPU window for an adaptive refill. CPU workers are cancelled only after their completed numbered scenes are durable, and queues are reconstructed from the archive while excluding every rendered scene still awaiting assembly. A successful refill records a bounded event history and resumes CPU sustain; an ordinary refill failure disables further attempts for that session, while failure to prove CUDA release stops the pipeline before Wan can collide with it.
-
-Advanced settings include a **Context compaction interval** measured in planned scenes. The default is 30; values from 5–200 are accepted, and 0 disables interval-based compaction. Adaptive GPU refills always compact once, regardless of that interval. Compaction does not truncate the bible or blindly summarize the last characters of a prompt. Gemma replaces cumulative story prose with a bounded current-situation summary and structured character state, unresolved threads, possessions, locations and irreversible continuity facts. Ten older scene descriptors are replaced by three immediate causal anchors; the normal ten-scene window grows back as new scenes are created. Oversized results are rejected and retried, and a failed compaction keeps the previous context. The compacted state, scene boundary and bounded event history are stored in both the live session and durable archive.
-
-Sentence pairs, language codes, translated titles, the complete configuration, word counts, model timing/context, and GPU-feed wait are stored in the ordinary session and archive JSON. Version 1 sessions without bilingual fields remain playable and resumable.
-
-Every UI page includes **Exit and release**. The localhost-only action interrupts queued ComfyUI work, marks active Theater and movie work resumable, stops app-owned Gemma, Supertonic, Kiwix, movie-planner and ComfyUI process trees, unloads ComfyUI models, and then closes the local web server. Manually started services are never killed by name. Closing an ordinary browser tab does not stop generation. If FFmpeg alone receives an external Windows termination signal, Theater retries that synchronization command once; structured encoding errors still fail immediately and remain visible.
+Every UI page includes **Exit and release**. The localhost-only action interrupts queued ComfyUI work, marks active Theater work resumable, stops app-owned Gemma, Supertonic, Kiwix, and ComfyUI process trees, unloads ComfyUI models, and closes the local web server.
 
 ## Development
 
-Run the same checks used by GitHub Actions:
+Run the checks:
 
 ```powershell
-python -m py_compile app.py movie_pipeline.py theater_pipeline.py test_prompt.py
+python -m py_compile app.py theater_pipeline.py test_prompt.py
 python -m unittest -v test_prompt.py
 ```
 
-Tests do not download models or require a GPU. See `CONTRIBUTING.md` and `SECURITY.md` before opening a pull request.
+Tests do not download models or require a GPU.
 
 ## Security and privacy
 
 All services bind to loopback by default. There is no authentication layer; do not expose these ports directly to an untrusted network. The application forces Hugging Face and Transformers offline mode when it launches ComfyUI.
-
-## Troubleshooting
-
-- UI log: `logs/wan-video-ui.log`
-- ComfyUI logs: `logs/comfyui.out.log` and `logs/comfyui.err.log`
-- Story-session writer logs: `<output>/wan_theater/<session>/logs/`
-- If Theater reports a missing writer, verify both the exact GGUF filename and `runtime/llama-server.exe` beneath `WAN_GEMMA4_ROOT`.
-- If FFmpeg is not found, add both `ffmpeg.exe` and `ffprobe.exe` to `PATH`.

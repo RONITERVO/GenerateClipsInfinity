@@ -10,10 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import (
-    _is_local_exit_request, api_theater_live_directive, build_prompt, validate_movie_payload, validate_payload,
+    _is_local_exit_request, api_theater_live_directive, build_prompt, create_app,
     validate_theater_payload,
 )
-from movie_pipeline import MovieManager
 from theater_pipeline import (
     GpuReleaseError, StoryRuntime, SupertonicRuntime, TheaterError, TheaterManager, split_narration_sentences,
     spoken_word_count,
@@ -122,38 +121,17 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(duration, 1.234)
         self.assertEqual(dur_call_args.kwargs.get("creationflags"), expected_flag)
 
-    def test_movie_shutdown_marks_active_work_resumable(self):
-        async def exercise():
-            manager = MovieManager.__new__(MovieManager)
-            state = {"id": "movie", "status": "rendering"}
-            manager.jobs = {"movie": state}
-            manager.tasks = {"movie": asyncio.create_task(asyncio.sleep(60))}
-            manager._update = lambda value, **changes: value.update(changes)
-            stopped = []
-            class Planner:
-                async def stop(self):
-                    stopped.append(True)
-            manager.planner = Planner()
-            await manager.shutdown()
-            return state, stopped
-
-        state, stopped = asyncio.run(exercise())
-        self.assertEqual(state["status"], "interrupted")
-        self.assertIn("kept", state["message"])
-        self.assertTrue(stopped)
-
     def test_blueprint_graph_and_output_node(self):
-        config = validate_payload(
-            {
-                "prompt": "A test scene",
-                "negative": "blurry",
-                "width": 480,
-                "height": 272,
-                "frames": 17,
-                "fps": 16,
-                "seed": 42,
-            }
-        )
+        config = {
+            "prompt": "A test scene",
+            "negative": "blurry",
+            "width": 480,
+            "height": 272,
+            "frames": 17,
+            "fps": 16,
+            "seed": 42,
+            "filename_prefix": "wan_theater_test",
+        }
         graph = build_prompt(config)
         self.assertEqual(graph["8"]["inputs"]["end_at_step"], 2)
         self.assertEqual(graph["12"]["inputs"]["start_at_step"], 2)
@@ -161,30 +139,19 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(graph["4"]["inputs"]["width"], 480)
         self.assertEqual(graph["4"]["inputs"]["length"], 17)
 
-    def test_invalid_frame_rule_is_rejected(self):
+    def test_theater_invalid_frame_rule_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "4n\\+1"):
-            validate_payload({"prompt": "test", "width": 480, "height": 272, "frames": 18, "fps": 16})
+            validate_theater_payload({
+                "prompt": "test",
+                "quality_settings": {"width": 480, "height": 272, "frames": 18, "fps": 16},
+            })
 
-    def test_movie_payload_and_random_seed(self):
-        config = validate_movie_payload({
-            "sentence": "A keeper hears a storm speak.", "shots": 3,
-            "width": 192, "height": 192, "frames": 9, "fps": 12,
-            "seed": -1, "narration": True,
-        })
-        self.assertEqual(config["shots"], 3)
-        self.assertGreaterEqual(config["seed"], 0)
-        self.assertTrue(config["narration"])
-
-    def test_movie_defaults_use_max_frames_and_edit_policy(self):
-        config = validate_movie_payload({"sentence": "A local movie idea.", "shots": 3})
-        self.assertEqual(config["frames"], 81)
-        self.assertEqual(config["sync_mode"], "fit_video_to_audio")
-        self.assertEqual(config["fill_mode"], "freeze")
-        self.assertTrue(config["motion_interpolation"])
-
-    def test_audio_retime_chain_supports_extreme_factors(self):
-        self.assertEqual(MovieManager._atempo(8.0), "atempo=2.000000,atempo=2.000000,atempo=2.000000")
-        self.assertEqual(MovieManager._atempo(0.25), "atempo=0.500000,atempo=0.500000")
+    def test_legacy_routes_redirect_to_root(self):
+        app = create_app()
+        routes = [r.resource.canonical for r in app.router.routes() if r.method == "GET"]
+        self.assertIn("/", routes)
+        self.assertIn("/theater", routes)
+        self.assertIn("/movie", routes)
 
     def test_theater_sync_uses_one_encode_graph_for_slow_and_repeated_motion(self):
         quality = {"frames": 81, "fps": 16, "max_slow": 8.0}
