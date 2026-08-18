@@ -135,7 +135,9 @@ class PromptTests(unittest.TestCase):
         graph = build_prompt(config)
         self.assertEqual(graph["8"]["inputs"]["end_at_step"], 2)
         self.assertEqual(graph["12"]["inputs"]["start_at_step"], 2)
+        self.assertEqual(graph["15"]["class_type"], "CreateVideo")
         self.assertEqual(graph["16"]["class_type"], "SaveVideo")
+        self.assertEqual(graph["16"]["inputs"]["video"], ["15", 0])
         self.assertEqual(graph["4"]["inputs"]["width"], 480)
         self.assertEqual(graph["4"]["inputs"]["length"], 17)
 
