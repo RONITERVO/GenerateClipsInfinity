@@ -80,7 +80,11 @@
           <div>
             <div class="yt-waiting-spinner"></div>
             <strong id="waitTitle">The theater is ready</strong>
-            <p id="waitText">Type a prompt into the top search bar and press Enter to begin the stream.</p>
+            <p id="waitText">Type a story prompt into the search bar at the top or click below.</p>
+            <button class="yt-btn-subscribe" id="btnFocusSearchFromWaiting" type="button" style="margin:14px auto 0;display:inline-flex;" onclick="document.getElementById('ytSearchInput').focus();">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              <span>Type Prompt in Search Bar</span>
+            </button>
           </div>
         </div>
 
@@ -139,7 +143,11 @@
             <div class="yt-channel-name">Endless Story Engine</div>
             <div class="yt-channel-subs">Wan 2.2 · RTX 5070 · Gemma 4 E4B · 100% Local</div>
           </div>
-          <button class="yt-btn-subscribe" id="btnOpenDirectTab" type="button" onclick="document.getElementById('tabChat').click()">
+          <button class="yt-btn-subscribe" id="btnStartStoryPrompt" type="button" onclick="document.getElementById('ytSearchInput').focus();">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            <span>Prompt Story</span>
+          </button>
+          <button class="yt-pill-btn" id="btnOpenDirectTab" type="button" onclick="document.getElementById('tabChat').click()">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
             <span>Direct Story</span>
           </button>
@@ -158,13 +166,13 @@
       </div>
 
       <!-- YouTube Description Card -->
-      <div class="yt-desc-card">
+      <div class="yt-desc-card" onclick="document.getElementById('ytSearchInput').focus();" title="Click to prompt in search bar">
         <div class="yt-desc-header">
           <strong id="descViews">0 scenes</strong>
           <span id="descDate">Cinema 480×272 · 16 FPS</span>
           <span id="sceneNoBadge">No active scene</span>
         </div>
-        <div id="descPromptText" style="color:#d1d5db;margin-bottom:6px;">Prompt living story in the search bar above.</div>
+        <div id="descPromptText" style="color:#d1d5db;margin-bottom:6px;">Click here or search bar above to type a story prompt.</div>
         <div class="yt-desc-fact" id="descFactBox" hidden></div>
       </div>
     </div>
