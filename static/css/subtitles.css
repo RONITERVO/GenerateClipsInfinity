@@ -1,149 +1,124 @@
 /**
  * ============================================================================
- * YOUTUBE-INSPIRED REAL-TIME DRAGGABLE SUBTITLES (subtitles.css)
+ * YOUTUBE REAL-TIME DRAGGABLE CLOSED CAPTIONS (subtitles.css)
  * ============================================================================
- * Artists can customize:
- * - Subtitle font size, color, background transparency, and blur.
- * - Bilingual paired translation layout and highlights.
- * - Drag handle indicators and hover controls.
+ * Exact YouTube CC look & feel: semi-transparent black background, crisp
+ * white typography, draggable positioning anywhere across the video stage.
  * ============================================================================
  */
 
-.caption-overlay {
+.yt-caption-window {
   position: absolute;
-  bottom: 24px;
+  bottom: 56px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 10;
-  max-width: 86%;
+  z-index: 15;
+  max-width: 85%;
   width: auto;
-  min-width: 280px;
-  background: var(--caption-bg);
-  backdrop-filter: var(--caption-blur);
-  -webkit-backdrop-filter: var(--caption-blur);
-  border: var(--caption-border);
-  border-radius: var(--caption-radius);
-  box-shadow: var(--caption-shadow);
-  padding: 12px 18px 14px;
+  min-width: 200px;
+  background: var(--yt-cc-bg);
+  backdrop-filter: var(--yt-cc-blur);
+  -webkit-backdrop-filter: var(--yt-cc-blur);
+  border-radius: var(--yt-cc-radius);
+  padding: 6px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
   user-select: none;
   cursor: grab;
-  transition: box-shadow var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-normal);
   touch-action: none;
+  transition: opacity var(--yt-transition-fast), border-color var(--yt-transition-fast);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.caption-overlay:hover {
-  border-color: rgba(255, 255, 255, 0.22);
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(56, 189, 248, 0.25);
+.yt-caption-window:hover {
+  border-color: rgba(255, 255, 255, 0.25);
 }
 
-.caption-overlay.dragging {
+.yt-caption-window.dragging {
   cursor: grabbing;
   opacity: 0.95;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 0 2px var(--color-brand-primary);
+  border-color: var(--yt-blue);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8), 0 0 0 2px rgba(62, 166, 255, 0.4);
   transition: none;
 }
 
-/* Drag Grab Bar Indicator */
-.caption-drag-handle {
+/* Subtle Hover Grab Affordance */
+.yt-caption-handle {
   display: flex;
   justify-content: center;
   align-items: center;
-  margin: -6px auto 8px;
-  height: 10px;
-  width: 44px;
-  cursor: grab;
+  height: 6px;
+  margin: -2px auto 4px;
 }
 
-.caption-drag-pill {
-  width: 32px;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.25);
-  border-radius: var(--radius-pill);
-  transition: background var(--transition-fast), width var(--transition-fast);
+.yt-caption-pill {
+  width: 28px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 2px;
+  transition: background var(--yt-transition-fast);
 }
 
-.caption-overlay:hover .caption-drag-pill {
-  background: var(--color-brand-primary);
-  width: 38px;
+.yt-caption-window:hover .yt-caption-pill {
+  background: var(--yt-white);
 }
 
-/* Quick Tools Toolbar on Hover */
-.caption-tools {
+/* Hover Tools */
+.yt-caption-tools {
   position: absolute;
-  top: 6px;
-  right: 8px;
+  top: 4px;
+  right: 6px;
   display: flex;
   gap: 4px;
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--transition-fast);
+  transition: opacity var(--yt-transition-fast);
 }
 
-.caption-overlay:hover .caption-tools {
+.yt-caption-window:hover .yt-caption-tools {
   opacity: 1;
   pointer-events: auto;
 }
 
-.caption-tool-btn {
-  background: rgba(255, 255, 255, 0.1);
-  border: 0;
-  color: var(--text-secondary);
-  border-radius: var(--radius-xs);
-  padding: 3px 6px;
+.yt-caption-tool-btn {
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: var(--yt-white);
+  border-radius: 3px;
+  padding: 2px 6px;
   font-size: 10px;
   cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 
-.caption-tool-btn:hover {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
+.yt-caption-tool-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
 
-/* Real-Time Subtitle Content */
-.caption-body {
-  font-family: var(--font-family-body);
-  font-size: var(--caption-font-size);
-  font-weight: var(--caption-font-weight);
-  line-height: var(--caption-line-height);
-  color: var(--caption-text-color);
+/* CC Text Content */
+.yt-caption-text {
+  font-family: var(--yt-font-family);
+  font-size: var(--yt-cc-font-size);
+  font-weight: var(--yt-cc-font-weight);
+  line-height: var(--yt-cc-line-height);
+  color: var(--yt-cc-text);
   text-align: center;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
   word-break: break-word;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
 }
 
-/* Bilingual Paired Sentences */
-.caption-bilingual-pair {
+/* Paired Bilingual Translation */
+.yt-caption-pair {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 3px;
   text-align: center;
 }
 
-.caption-original {
-  color: var(--caption-text-color);
-  font-size: var(--caption-font-size);
+.yt-caption-original {
+  color: #ffffff;
 }
 
-.caption-translation {
-  color: var(--caption-translation-color);
-  font-size: calc(var(--caption-font-size) - 1.5px);
+.yt-caption-translation {
+  color: var(--yt-cc-translation);
+  font-size: calc(var(--yt-cc-font-size) - 1.5px);
   font-weight: 500;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-
-.caption-badge {
-  display: inline-block;
-  font-family: var(--font-family-display);
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--caption-tag-bg);
-  color: var(--caption-tag-color);
 }

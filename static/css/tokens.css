@@ -1,10 +1,8 @@
 /**
  * ============================================================================
- * ENDLESS THEATER DESIGN TOKENS (tokens.css)
+ * YOUTUBE THEME DESIGN TOKENS (tokens.css)
  * ============================================================================
- * Designed for visual artists and stylists:
- * To customize the look, colors, subtitle styles, and ambiance of the app,
- * simply edit the CSS variables below! No JavaScript or Python code needed.
+ * Exact YouTube Dark Mode color palette, typography, and elevations.
  * ============================================================================
  */
 
@@ -12,88 +10,63 @@
   color-scheme: dark;
 
   /* --------------------------------------------------------------------------
-   * 1. CORE THEME & ACCENT PALETTE (Google DeepMind / Material 3 Dark)
+   * 1. YOUTUBE CORE BRAND & ACCENT COLORS
    * -------------------------------------------------------------------------- */
-  --color-brand-primary: #38bdf8;        /* Vivid Sky/Cyan primary accent */
-  --color-brand-secondary: #818cf8;      /* Indigo/Violet companion glow */
-  --color-brand-gradient: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
-  --color-brand-glow: rgba(56, 189, 248, 0.25);
-
-  /* Semantic status colors */
-  --color-accent-cyan: #38bdf8;          /* Active stream / Highlights */
-  --color-accent-violet: #a78bfa;        /* Neural writer / Story generation */
-  --color-accent-amber: #fbbf24;         /* Telemetry / Buffer warning */
-  --color-accent-green: #34d399;         /* Safe buffer / Ready state */
-  --color-accent-red: #f87171;           /* Danger / Stop / Low buffer */
+  --yt-red: #ff0000;                     /* YouTube Brand Red */
+  --yt-red-live: #cc0000;                /* Live badge red */
+  --yt-blue: #3ea6ff;                    /* YouTube link & button blue */
+  --yt-blue-hover: #65b8ff;
+  --yt-white: #f1f1f1;                   /* Primary white text */
+  --yt-text-secondary: #aaaaaa;          /* Secondary metadata text */
+  --yt-text-muted: #717171;              /* Tertiary dim text */
+  --yt-border: rgba(255, 255, 255, 0.1); /* Standard 1px divider */
+  --yt-border-light: rgba(255, 255, 255, 0.2);
 
   /* --------------------------------------------------------------------------
-   * 2. BACKGROUNDS & SURFACES (Minimalist Studio Dark)
+   * 2. BACKGROUNDS & SURFACES (YouTube Dark Mode)
    * -------------------------------------------------------------------------- */
-  --bg-app: #08090d;                     /* Deep matte obsidian base */
-  --bg-app-radial: radial-gradient(circle at 15% -10%, rgba(56, 189, 248, 0.08), transparent 40rem),
-                   radial-gradient(circle at 85% -10%, rgba(129, 140, 248, 0.08), transparent 45rem),
-                   #08090d;
-
-  --surface-card: rgba(17, 20, 29, 0.85); /* Frosted card surface */
-  --surface-card-hover: rgba(22, 26, 38, 0.92);
-  --surface-card-blur: blur(24px);
-  --surface-inset: rgba(9, 11, 17, 0.8);
-  --surface-elevated: rgba(26, 31, 46, 0.95);
-
-  /* Borders & Dividers */
-  --border-subtle: rgba(255, 255, 255, 0.07);
-  --border-focus: rgba(56, 189, 248, 0.6);
-  --border-glow: 0 0 0 3px rgba(56, 189, 248, 0.15);
+  --yt-bg-base: #0f0f0f;                 /* Main watch page background */
+  --yt-bg-header: #0f0f0f;               /* Fixed top navigation bar */
+  --yt-surface-chip: rgba(255, 255, 255, 0.08); /* Filter chips / pill buttons */
+  --yt-surface-chip-hover: rgba(255, 255, 255, 0.16);
+  --yt-surface-chip-active: #f1f1f1;
+  --yt-surface-card: #212121;            /* Card / popup background */
+  --yt-surface-desc: #272727;            /* Description box background */
+  --yt-surface-desc-hover: #383838;
+  --yt-surface-input: #121212;           /* Search input background */
+  --yt-surface-search-btn: rgba(255, 255, 255, 0.06);
 
   /* --------------------------------------------------------------------------
-   * 3. TYPOGRAPHY & TEXT HIERARCHY
+   * 3. YOUTUBE CLOSED CAPTIONS (CC / SUBTITLES)
    * -------------------------------------------------------------------------- */
-  --font-family-display: "Outfit", "Google Sans", system-ui, -apple-system, sans-serif;
-  --font-family-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-family-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
-  --font-family-serif: "Newsreader", "Georgia", serif;
-
-  --text-primary: #f8fafc;              /* Ultra-crisp title & body text */
-  --text-secondary: #94a3b8;            /* Subtitles, labels, descriptions */
-  --text-muted: #64748b;                /* Dim metadata, hints */
-  --text-inverse: #030712;              /* Text on bright buttons */
+  --yt-cc-bg: rgba(8, 8, 8, 0.78);       /* YouTube CC dark background */
+  --yt-cc-blur: blur(8px);
+  --yt-cc-border: 1px solid rgba(255, 255, 255, 0.12);
+  --yt-cc-text: #ffffff;
+  --yt-cc-font-size: 17px;
+  --yt-cc-font-weight: 500;
+  --yt-cc-line-height: 1.45;
+  --yt-cc-radius: 8px;
+  --yt-cc-translation: #3ea6ff;          /* Translation line color */
 
   /* --------------------------------------------------------------------------
-   * 4. YOUTUBE-INSPIRED REAL-TIME SUBTITLES (DRAGGABLE OVERLAY)
+   * 4. TYPOGRAPHY & FONT STACKS
    * -------------------------------------------------------------------------- */
-  --caption-bg: rgba(9, 10, 15, 0.88);  /* Semi-transparent caption chip */
-  --caption-blur: blur(16px);
-  --caption-border: 1px solid rgba(255, 255, 255, 0.12);
-  --caption-shadow: 0 12px 36px rgba(0, 0, 0, 0.65), 0 2px 8px rgba(0, 0, 0, 0.4);
-  --caption-radius: 14px;
-  --caption-text-color: #ffffff;
-  --caption-font-size: 16px;
-  --caption-font-weight: 500;
-  --caption-line-height: 1.5;
-  --caption-translation-color: #67e8f9;  /* Cyan subtitle translation */
-  --caption-tag-color: #94a3b8;
-  --caption-tag-bg: rgba(255, 255, 255, 0.08);
+  --yt-font-family: "Roboto", "YouTube Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --yt-font-family-mono: "Roboto Mono", Consolas, monospace;
 
   /* --------------------------------------------------------------------------
-   * 5. SQUIRCLES & ELEVATION RADIUSES (Google Material 3 / Apple)
+   * 5. SQUIRCLES & RADII
    * -------------------------------------------------------------------------- */
-  --radius-xs: 6px;
-  --radius-sm: 10px;
-  --radius-md: 14px;
-  --radius-lg: 20px;
-  --radius-xl: 28px;
-  --radius-pill: 9999px;
-
-  /* Shadows */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.25);
-  --shadow-md: 0 12px 28px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.55);
-  --shadow-stage: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 32px 80px rgba(0, 0, 0, 0.8);
+  --yt-radius-xs: 4px;
+  --yt-radius-sm: 8px;
+  --yt-radius-md: 12px;
+  --yt-radius-lg: 18px;
+  --yt-radius-pill: 9999px;
 
   /* --------------------------------------------------------------------------
-   * 6. MOTION & TRANSITION TIMINGS
+   * 6. TRANSITIONS
    * -------------------------------------------------------------------------- */
-  --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-normal: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-smooth: 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  --yt-transition-fast: 0.15s ease;
+  --yt-transition-normal: 0.25s ease;
 }

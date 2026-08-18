@@ -1,14 +1,13 @@
 /**
  * ============================================================================
- * ENDLESS THEATER MAIN STYLESHEET (index.css)
- * ============================================================================
- * Modular stylesheet entrypoint. Imports design tokens, layout grids,
- * component styles, subtitle overlays, and animation keyframes.
+ * YOUTUBE THEATER STYLESHEET ENTRYPOINT (index.css)
  * ============================================================================
  */
 
 @import url("./tokens.css");
 @import url("./layout.css");
-@import url("./components.css");
+@import url("./youtube-player.css");
 @import url("./subtitles.css");
+@import url("./youtube-sidebar.css");
+@import url("./components.css");
 @import url("./animations.css");

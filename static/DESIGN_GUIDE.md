@@ -1,123 +1,71 @@
-# Endless Theater — Artist & Designer Styling Guide
+# Endless Theater — YouTube-Native Design Guide
 
-Welcome to the **Endless Offline Theater** styling system! This frontend is designed for visual artists and designers to rapidly adjust styles, colors, typography, and subtitle placement with **zero risk** of breaking backend Python code or frontend JavaScript logic.
+Welcome to the **YouTube-Native Endless Theater** design system. If someone only knows YouTube, this interface feels 100% like home: familiar layout, 100vh zero outer scroll, standard YouTube search prompt bar, video controls, draggable Closed Captions (CC), and an "Up Next" / Live Chat sidebar.
 
 ---
 
-## 📁 File Structure for Designers
+## 📁 Modular Stylesheet Architecture
 
-All visual styling is cleanly organized in `static/css/`:
+All visual styling is organized in `static/css/`:
 
 ```text
 static/
 ├── css/
-│   ├── tokens.css       <-- 🎨 PRIMARY THEME FILE: Colors, fonts, shadows, glassmorphism
-│   ├── subtitles.css    <-- 💬 YOUTUBE-STYLE SUBTITLE OVERLAY: Font, background, drag handle
-│   ├── components.css   <-- 🔘 BUTTONS, INPUTS, CHIPS, TELEMETRY: Form styling & badges
-│   ├── layout.css       <-- 📐 GRIDS & STAGE: Two-column layout, player viewport, responsiveness
-│   ├── animations.css   <-- ✨ MOTION & GLOW: Keyframe pulses, spinners, fades
-│   └── index.css        <-- Main stylesheet importer
+│   ├── tokens.css             <-- 🎨 YOUTUBE PALETTE: Backgrounds, red accents, CC captions
+│   ├── layout.css             <-- 📐 100VH WATCH LAYOUT: Fixed header, 2-column zero-scroll grid
+│   ├── youtube-player.css     <-- 🎬 VIDEO CONTROLS: Scrubber, Play/Pause, Live chip, CC
+│   ├── subtitles.css          <-- 💬 YOUTUBE CC CAPTIONS: Draggable caption overlay & translations
+│   ├── youtube-sidebar.css    <-- 📑 SIDEBAR: Recommendation cards, Live Chat stream, filter chips
+│   ├── components.css         <-- 🔘 CHANNEL ROW & MODAL: Action buttons, Description, Settings
+│   ├── animations.css         <-- ✨ MOTION: Stream waves, spinner
+│   └── index.css              <-- Main aggregator entrypoint
 ├── js/
-│   ├── subtitles.js     <-- Draggable caption mechanics (don't touch unless adding JS features)
-│   └── theater.js       <-- Application streaming logic
-└── index.html           <-- Semantic HTML5 structure
+│   ├── subtitles.js           <-- Draggable caption mechanics
+│   └── theater.js             <-- Search prompt bar, player controls, polling
+└── index.html                 <-- Semantic YouTube watch-page markup
 ```
 
 ---
 
-## 🎨 Fast Theming with Design Tokens (`tokens.css`)
+## 🎨 Fast Theming via `tokens.css`
 
-To change the look and feel of the entire application, simply open `static/css/tokens.css` and edit the CSS variables.
+To modify the theme, open `static/css/tokens.css` and edit the CSS variables:
 
-### 1. Brand Accents
+### 1. YouTube Brand Accents
 ```css
---color-brand-primary: #38bdf8;     /* Primary interactive glow (buttons, highlights) */
---color-brand-secondary: #818cf8;   /* Companion accent glow */
---color-brand-gradient: linear-gradient(135deg, #38bdf8, #818cf8 50%, #c084fc);
---color-brand-glow: rgba(56, 189, 248, 0.25);
+--yt-red: #ff0000;                     /* YouTube Brand Red */
+--yt-blue: #3ea6ff;                    /* YouTube link & button blue */
+--yt-white: #f1f1f1;                   /* Primary white text */
+--yt-text-secondary: #aaaaaa;          /* Secondary metadata text */
 ```
 
-### 2. Canvas & Surface Tones
+### 2. Surfaces & Backgrounds
 ```css
---bg-app: #08090d;                    /* App background canvas */
---surface-card: rgba(17, 20, 29, 0.85);/* Frosted card surface */
---border-subtle: rgba(255, 255, 255, 0.07); /* Clean 1px border */
+--yt-bg-base: #0f0f0f;                 /* Main watch page background */
+--yt-surface-desc: #272727;            /* Description card background */
+--yt-surface-input: #121212;           /* Search & chat input background */
 ```
 
-### 3. Real-Time YouTube-Style Subtitles
+### 3. Real-Time Draggable Closed Captions (CC)
 ```css
---caption-bg: rgba(9, 10, 15, 0.88);  /* Caption chip background */
---caption-blur: blur(16px);           /* Glassmorphism blur */
---caption-text-color: #ffffff;        /* High-contrast subtitle text */
---caption-translation-color: #67e8f9; /* Translation subtitle highlight */
---caption-radius: 14px;               /* Caption pill roundedness */
---caption-font-size: 16px;            /* Subtitle text size */
-```
-
----
-
-## 🌈 Preset Theme Recipes
-
-Copy and paste any of these recipes into `:root` in `static/css/tokens.css` to instantly transform the theater:
-
-### 🌟 1. Google DeepMind Minimalist (Default)
-```css
---color-brand-primary: #38bdf8;
---color-brand-secondary: #818cf8;
---color-brand-gradient: linear-gradient(135deg, #38bdf8, #818cf8 50%, #c084fc);
---color-brand-glow: rgba(56, 189, 248, 0.25);
---bg-app: #08090d;
---surface-card: rgba(17, 20, 29, 0.85);
-```
-
-### 🎬 2. Warm Cinema 35mm
-```css
---color-brand-primary: #f59e0b;
---color-brand-secondary: #f97316;
---color-brand-gradient: linear-gradient(135deg, #f59e0b, #f97316 60%, #ef4444);
---color-brand-glow: rgba(245, 158, 11, 0.3);
---bg-app: #0a0908;
---surface-card: rgba(24, 20, 17, 0.9);
---caption-translation-color: #fde68a;
-```
-
-### 🌌 3. Cyberpunk Synthwave
-```css
---color-brand-primary: #ec4899;
---color-brand-secondary: #8b5cf6;
---color-brand-gradient: linear-gradient(135deg, #ec4899, #8b5cf6 50%, #06b6d4);
---color-brand-glow: rgba(236, 72, 153, 0.35);
---bg-app: #07050f;
---surface-card: rgba(19, 14, 33, 0.88);
---caption-translation-color: #a5f3fc;
-```
-
-### 🌿 4. Emerald Studio Minimalist
-```css
---color-brand-primary: #10b981;
---color-brand-secondary: #06b6d4;
---color-brand-gradient: linear-gradient(135deg, #10b981, #06b6d4);
---color-brand-glow: rgba(16, 185, 129, 0.25);
---bg-app: #060c09;
---surface-card: rgba(11, 23, 18, 0.9);
---caption-translation-color: #6ee7b7;
+--yt-cc-bg: rgba(8, 8, 8, 0.78);       /* YouTube CC semi-transparent dark background */
+--yt-cc-text: #ffffff;                 /* High contrast subtitle text */
+--yt-cc-font-size: 17px;               /* Subtitle text size */
+--yt-cc-translation: #3ea6ff;          /* Translation line color */
 ```
 
 ---
 
-## 💬 Customizing YouTube-Inspired Real-Time Subtitles
+## 💬 Real-Time Draggable Closed Captions
 
-The real-time subtitles overlay (`#captionOverlay`) floats over the video stage and can be dragged anywhere by the user.
-
-- **Background & Acrylic Blur**: Edit `--caption-bg` and `--caption-blur` in `tokens.css`.
-- **Drag Handle**: In `subtitles.css`, edit `.caption-drag-pill` to change the grab handle size, color, or pill thickness.
-- **Bilingual Tag Badge**: In `subtitles.css`, edit `.caption-badge` to customize the `[Translate]` tag styling.
-- **Position Persistence**: The subtitle position is clamped automatically within video bounds and saved in `localStorage`. Clicking **Reset** restores it to bottom-center.
+- Spoken narration floats directly over the video canvas in a classic YouTube CC box.
+- Users can click and drag the caption box anywhere on the screen (e.g. top-left, center, bottom-right).
+- Positions are clamped within the video stage and saved to `localStorage`.
+- Hovering over the captions reveals a **Reset** button to snap back to bottom-center.
 
 ---
 
-## 🛡️ Safe Styling Rules of Thumb
+## 🛡️ Safe Styling Rules
 
-1. ✅ **DO edit CSS files** (`static/css/*.css`) freely. Refresh your browser at `http://127.0.0.1:7868/` to see your changes immediately.
-2. ✅ **DO change layout structure or card padding** in `layout.css`.
-3. ⚠️ **DON'T delete element IDs** in `index.html` (such as `id="screen"`, `id="playerA"`, `id="captionOverlay"`, `id="start"`), as JavaScript binds to these IDs.
+1. ✅ **Edit CSS freely** in `static/css/*.css`. Refresh `http://127.0.0.1:7868/` to see your changes instantly.
+2. ⚠️ **Keep element IDs intact** in `index.html` (such as `id="ytSearchForm"`, `id="ytPlayerContainer"`, `id="playerA"`, `id="ytCaptionWindow"`), as JavaScript binds to these IDs.

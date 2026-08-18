@@ -1,8 +1,9 @@
 /**
  * ============================================================================
- * ENDLESS OFFLINE THEATER CONTROLLER (theater.js)
+ * YOUTUBE NATIVE THEATER CONTROLLER (theater.js)
  * ============================================================================
- * Manages playback, state polling, live steering directives, and telemetry.
+ * Handles YouTube watch-page player controls, search bar prompt engine,
+ * sidebar recommendations / playlist, live chat steering, and settings modal.
  * ============================================================================
  */
 
@@ -18,9 +19,11 @@
   let front = 'A';
   let playbackStarted = false;
   let userMuted = false;
+  let isCcEnabled = true;
   let lastSegmentCount = 0;
   let directiveRequestInFlight = false;
   let subtitleManager = null;
+  let activeSidebarTab = 'scenes'; // 'scenes', 'chat', 'saved'
 
   const players = {
     A: $('playerA'),
@@ -45,117 +48,124 @@
     seconds = Math.max(0, Math.round(seconds || 0));
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
-    return m ? `${m}m ${s}s` : `${s}s`;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
   }
 
   function mediaUrl(path) {
     return `/api/video?path=${encodeURIComponent(path)}`;
   }
 
-  function populateTranslationLanguages() {
-    const target = $('translationLanguage');
-    const source = $('language');
-    if (!target || !source) return;
+  // --------------------------------------------------------------------------
+  // YouTube Search Bar Story Submission
+  // --------------------------------------------------------------------------
+  async function submitStoryPrompt(e) {
+    if (e) e.preventDefault();
+    const promptInput = $('ytSearchInput');
+    const prompt = (promptInput?.value || '').trim();
 
-    [...source.options]
-      .filter((opt) => opt.value && opt.value !== 'na')
-      .forEach((opt) => {
-        const copy = document.createElement('option');
-        copy.value = opt.value;
-        copy.textContent = opt.textContent;
-        target.appendChild(copy);
+    if (!prompt) {
+      toast('Enter a story idea or topic in the search bar');
+      return;
+    }
+
+    const mode = $('modeSelect')?.value || 'edutainment';
+    const audience = $('audienceSelect')?.value || 'family';
+    const language = $('languageSelect')?.value || 'en';
+    const translation_language = $('transLanguageSelect')?.value || '';
+    const voice = $('voiceSelect')?.value || 'M1';
+    const learning_focus = mode === 'dream' ? '' : ($('learningInput')?.value || '').trim();
+
+    const quality_settings = {
+      width: Number($('qualityWidth')?.value || 480),
+      height: Number($('qualityHeight')?.value || 272),
+      frames: Number($('qualityFrames')?.value || 81),
+      fps: Number($('qualityFps')?.value || 16),
+      min_words: Number($('minWords')?.value || 80),
+      max_words: Number($('maxWords')?.value || 110),
+      max_slow: Number($('maxSlow')?.value || 8.0),
+    };
+
+    const payload = {
+      prompt,
+      learning_focus,
+      mode,
+      audience,
+      language,
+      translation_language,
+      voice,
+      quality_settings,
+      context_compaction_scenes: Number($('compactionScenes')?.value || 30),
+      seed: Number($('seedInput')?.value || -1),
+    };
+
+    $('playerWaiting').style.display = 'grid';
+    $('waitTitle').textContent = 'Starting endless stream';
+    $('waitText').textContent = 'Gemma builds opening buffer and hands RTX GPU to Wan text-to-video.';
+
+    try {
+      const r = await fetch('/api/theater', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
-    syncTranslationLanguages();
-  }
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Could not start story');
 
-  function syncTranslationLanguages() {
-    const source = $('language').value;
-    const target = $('translationLanguage');
-    if (!target) return;
-
-    [...target.options].forEach((option) => {
-      option.disabled = Boolean(option.value && option.value === source);
-    });
-    if (target.value === source) target.value = '';
-
-    const active = target.options[target.selectedIndex];
-    const note = $('translationNote');
-    if (note) {
-      note.textContent = target.value
-        ? `Each ${$('language').options[$('language').selectedIndex].textContent} sentence will be spoken and shown, followed by ${active.textContent}. The total speech duration stays aligned.`
-        : 'Optional: after every story sentence, show and speak its translation.';
+      currentIndex = -1;
+      playbackStarted = false;
+      lastSegmentCount = 0;
+      renderState(data);
+      loadRecent();
+    } catch (err) {
+      toast(err.message);
+      $('playerWaiting').style.display = 'none';
     }
   }
 
-  function syncLiveExperience(mode) {
-    const interactive = mode === 'interactive';
-    const dream = mode === 'dream';
-    const chatOption = [...$('liveScope').options].find((opt) => opt.value === 'audience_message');
-
-    if (chatOption) {
-      const wasDisabled = chatOption.disabled;
-      chatOption.hidden = !interactive;
-      chatOption.disabled = !interactive;
-      if (interactive && wasDisabled) $('liveScope').value = 'audience_message';
-      if (!interactive && $('liveScope').value === 'audience_message') $('liveScope').value = 'next_scene';
-    }
-
-    $('liveControlTitle').textContent = interactive
-      ? 'Chat with the character or decide what happens'
-      : dream
-      ? 'Whisper into the dream'
-      : 'Direct the world while it runs';
-
-    $('liveControlHelp').textContent = interactive
-      ? 'Type to the recurring host, decide a later moment, or set a persistent show rule. Delayed chat preserves every prepared scene. The host answers aloud when its reserved scene arrives.'
-      : dream
-      ? 'Add another image or feeling. It enters as a later association without cancelling prepared scenes or turning the dream into a factual explanation.'
-      : 'By default direction waits behind every scene Gemma already planned, wasting no work and creating no gap. Fast steering replaces speculative text, but never changes completed media.';
-
-    $('liveText').placeholder = interactive
-      ? 'For example: What surprised you most today?'
-      : dream
-      ? 'For example: warm rain'
-      : 'For example: A sudden summer storm forces everyone into the old lighthouse.';
-
-    $('liveSend').textContent = interactive ? 'Send to character' : dream ? 'Whisper' : 'Direct story';
-
-    if (!activeId) {
-      $('liveEffect').textContent = dream
-        ? 'Start a dream to add delayed associations. Whispers never add encyclopedia grounding.'
-        : 'Start or open a theater session to direct it. Directions cannot override premise or verified facts.';
+  // --------------------------------------------------------------------------
+  // YouTube Video Player Controls
+  // --------------------------------------------------------------------------
+  function togglePlayPause() {
+    const player = players[front];
+    if (player.paused) {
+      player.play().catch(() => {});
+      $('btnPlayPause').innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
+      $('ytPlayerContainer').classList.remove('paused');
+    } else {
+      player.pause();
+      $('btnPlayPause').innerHTML = `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>`;
+      $('ytPlayerContainer').classList.add('paused');
     }
   }
 
-  function syncExperienceSetup() {
-    const mode = $('mode').value;
-    const interactive = mode === 'interactive';
-    const dream = mode === 'dream';
-
-    $('promptLabel').textContent = interactive
-      ? 'Character, setting, and ongoing activity'
-      : dream
-      ? 'Dream seed · one word is enough'
-      : 'Story, world, or topic';
-
-    $('prompt').placeholder = interactive
-      ? 'A friendly night-shift lighthouse keeper restores old instruments, tells stories about the coast, and lets delayed viewer messages shape the evening.'
-      : dream
-      ? 'Velvet'
-      : 'A curious class explores the history of astronomy by traveling through a magical observatory where every discovery changes the night sky.';
-
-    $('experienceIntro').textContent = interactive
-      ? 'Create a resident on-screen character who keeps living their story and answers delayed text chat in future synchronized scenes.'
-      : dream
-      ? 'Offer a faint pre-sleep cue. Gemma invents the people, places, rules, and unfolding imagery without encyclopedia grounding or factual explanation.'
-      : 'One prompt begins a continuous local show. Gemma 4 E4B writes on CPU while the RTX 5070 creates each new scene.';
-
-    $('learningField').hidden = dream;
-    $('learning').disabled = dream;
-    if (dream) $('learning').value = '';
-    if (!activeId) syncLiveExperience(mode);
+  function toggleMute() {
+    userMuted = !userMuted;
+    players.A.muted = userMuted;
+    players.B.muted = userMuted;
+    $('btnMute').innerHTML = userMuted
+      ? `<svg viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>`
+      : `<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>`;
   }
 
+  function toggleCc() {
+    isCcEnabled = !isCcEnabled;
+    const captionEl = $('ytCaptionWindow');
+    if (captionEl) captionEl.style.display = isCcEnabled ? 'block' : 'none';
+    $('btnCc').classList.toggle('cc-active', isCcEnabled);
+  }
+
+  function toggleFullscreen() {
+    const container = $('ytPlayerContainer');
+    if (!document.fullscreenElement) {
+      container.requestFullscreen?.();
+    } else {
+      document.exitFullscreen?.();
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Playback Engine & Crossfade
+  // --------------------------------------------------------------------------
   function remainingBuffer() {
     if (!state?.segments?.length) return 0;
     let total = 0;
@@ -168,41 +178,47 @@
     return Math.max(0, total);
   }
 
-  function updateBuffer() {
-    const seconds = remainingBuffer();
-    const pct = Math.min(100, (seconds / 180) * 100);
-    $('bufferTime').textContent = fmt(seconds);
-    $('bufferBar').style.width = `${pct}%`;
-    $('bufferHealth').textContent =
-      seconds > 120 ? 'Protected' : seconds > 45 ? 'Building safely' : seconds > 0 ? 'Low — production adapting' : 'Waiting for unique scenes';
+  function updateBufferProgress() {
+    const player = players[front];
+    const dur = player.duration || 1;
+    const current = player.currentTime || 0;
+    const pct = Math.min(100, (current / dur) * 100);
+
+    $('scrubberPlayed').style.width = `${pct}%`;
+    $('currentTimeDisplay').textContent = `${fmt(current)} / ${fmt(dur)}`;
   }
 
   function showScene(index) {
-    const item = state.segments[index];
+    const item = state?.segments?.[index];
     if (!item) return;
     currentIndex = index;
 
-    $('sceneNo').textContent = `Scene ${item.number} · ${
-      item.motion_repeated ? 'protected forward/backward coverage' : 'continuous slow motion'
-    }`;
-    $('sceneTitle').textContent = item.translated_title ? `${item.title} · ${item.translated_title}` : item.title;
+    $('primaryVideoTitle').textContent = item.translated_title ? `${item.title} · ${item.translated_title}` : item.title;
+    $('sceneNoBadge').textContent = `Scene ${item.number}`;
 
-    // Render in real-time draggable subtitle overlay
+    // Render in YouTube Closed Captions
     if (subtitleManager) {
       subtitleManager.render(item);
     }
 
+    // Update Description Box
+    $('descViews').textContent = `${(state.segments || []).length} scenes`;
+    $('descDate').textContent = item.motion_repeated ? 'Forward/backward coverage' : 'Continuous slow motion';
+    $('descPromptText').textContent = state.config?.prompt || '';
+
     const lp = (item.learning_point || '').trim();
     const source = item.sources?.[0];
-    const learningEl = $('learningPoint');
-    learningEl.hidden = !lp;
-    learningEl.innerHTML = lp
-      ? `<b>Verified offline fact:</b> ${esc(lp)}${
-          source ? ` <a href="${esc(source.url)}" target="_blank" rel="noreferrer">${esc(source.title)}</a>` : ''
-        }`
-      : '';
+    const factBox = $('descFactBox');
+    if (factBox) {
+      factBox.hidden = !lp;
+      factBox.innerHTML = lp
+        ? `<b>Verified offline fact:</b> ${esc(lp)}${
+            source ? ` <a href="${esc(source.url)}" target="_blank" rel="noreferrer">${esc(source.title)}</a>` : ''
+          }`
+        : '';
+    }
 
-    renderQueue();
+    renderSidebar();
   }
 
   function preloadNext() {
@@ -233,18 +249,16 @@
     try {
       await player.play();
     } catch {
-      $('resumePlay').style.display = 'inline-flex';
-      $('waiting').style.display = 'grid';
-      $('waitTitle').textContent = 'Your browser paused the theater';
-      $('waitText').textContent = 'The first visual and narration are synchronized and ready.';
+      $('btnPlayPause').innerHTML = `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>`;
       return false;
     }
 
     players[front].classList.remove('live');
     front = candidate;
     player.classList.add('live');
-    $('waiting').style.display = 'none';
+    $('playerWaiting').style.display = 'none';
     playbackStarted = true;
+    $('btnPlayPause').innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
     showScene(index);
     preloadNext();
     return true;
@@ -256,195 +270,184 @@
       await playIndex(next);
       return;
     }
-    $('waiting').style.display = 'grid';
-    $('waitTitle').textContent = 'Protecting story continuity';
-    $('waitText').textContent =
-      'The next unique scene is still being made. Playback will resume automatically without reusing an earlier asset.';
+    $('playerWaiting').style.display = 'grid';
+    $('waitTitle').textContent = 'Generating Next Scene';
+    $('waitText').textContent = 'Continuity buffer is preparing the next unique visual asset.';
     playbackStarted = false;
   }
 
   players.A.addEventListener('ended', advance);
   players.B.addEventListener('ended', advance);
-
   players.A.addEventListener('timeupdate', () => {
-    if (front === 'A') {
-      updateBuffer();
-      $('clock').textContent = fmt(players.A.currentTime);
-    }
+    if (front === 'A') updateBufferProgress();
   });
-
   players.B.addEventListener('timeupdate', () => {
-    if (front === 'B') {
-      updateBuffer();
-      $('clock').textContent = fmt(players.B.currentTime);
-    }
+    if (front === 'B') updateBufferProgress();
   });
 
-  function renderQueue() {
-    const root = $('queue');
-    root.innerHTML = '';
-    if (!state?.segments?.length) {
-      root.innerHTML = '<span class="sub">Planning and generation are underway.</span>';
+  // --------------------------------------------------------------------------
+  // YouTube Sidebar: Up Next Recommendations & Live Chat
+  // --------------------------------------------------------------------------
+  function renderSidebar() {
+    if (activeSidebarTab === 'scenes') {
+      renderSceneRecommendations();
+    } else if (activeSidebarTab === 'chat') {
+      renderLiveChat();
+    } else if (activeSidebarTab === 'saved') {
+      renderSavedSessions();
+    }
+  }
+
+  function renderSceneRecommendations() {
+    const body = $('sidebarBody');
+    body.innerHTML = '';
+
+    const segments = state?.segments || [];
+    if (!segments.length) {
+      body.innerHTML = `<div style="color:var(--yt-text-secondary);padding:16px;text-align:center;">Planning stream scenes…</div>`;
       return;
     }
-    state.segments.forEach((s, i) => {
-      const el = document.createElement('div');
-      el.className = `scene-chip ${i === currentIndex ? 'current' : ''}`;
-      el.innerHTML = `<b>${s.number}. ${esc(s.title)}</b><small>${fmt(s.duration)} · ${
-        s.motion_repeated ? 'motion coverage' : 'slow motion'
-      }</small>`;
-      root.appendChild(el);
+
+    segments.forEach((s, idx) => {
+      const card = document.createElement('div');
+      card.className = `yt-video-card ${idx === currentIndex ? 'active' : ''}`;
+      card.innerHTML = `
+        <div class="yt-thumb-box">
+          <span class="yt-thumb-scene-num">#${s.number}</span>
+          <span class="yt-thumb-duration">${fmt(s.duration)}</span>
+        </div>
+        <div class="yt-video-meta">
+          <div class="yt-video-title">${esc(s.title)}</div>
+          <div class="yt-video-channel">Scene ${s.number} · Wan 2.2</div>
+          <div class="yt-video-stats">${s.motion_repeated ? 'Coverage motion' : 'Slow motion'}</div>
+        </div>
+      `;
+      card.onclick = () => playIndex(idx);
+      body.appendChild(card);
     });
   }
 
-  function renderDirectives() {
-    const root = $('directiveList');
-    const items = (state?.live_directives || []).filter((item) => ['pending', 'active'].includes(item.status));
-    root.innerHTML = '';
+  function renderLiveChat() {
+    const body = $('sidebarBody');
+    body.innerHTML = `
+      <div class="yt-chat-container">
+        <div class="yt-chat-messages" id="chatMsgList"></div>
+        <div class="yt-chat-input-row">
+          <textarea class="yt-chat-input" id="chatInput" placeholder="Send a message to host or direct story…"></textarea>
+          <button class="yt-chat-send-btn" id="btnSendChat">Send</button>
+        </div>
+      </div>
+    `;
 
-    $('liveText').disabled = !activeId;
-    $('liveScope').disabled = !activeId;
-    $('liveDelivery').disabled = !activeId;
-    $('liveSend').disabled = !activeId;
+    const list = $('chatMsgList');
+    const items = (state?.live_directives || []).filter((i) => ['pending', 'active'].includes(i.status));
 
     if (!items.length) {
-      root.innerHTML = '<span class="sub">No pending chat, events, or persistent rules.</span>';
+      list.innerHTML = `<div style="color:var(--yt-text-muted);font-size:12px;text-align:center;padding:24px 0;">No active directives. Type below to direct upcoming scenes.</div>`;
+    } else {
+      items.forEach((item) => {
+        const msg = document.createElement('div');
+        msg.className = 'yt-chat-msg';
+        msg.innerHTML = `
+          <div class="yt-chat-avatar">👤</div>
+          <div>
+            <span class="yt-chat-badge">${item.scope === 'audience_message' ? 'Chat' : item.scope === 'persistent' ? 'Rule' : 'Event'}</span>
+            <span class="yt-chat-author">Viewer</span>
+            <span>${esc(item.text)}</span>
+          </div>
+        `;
+        list.appendChild(msg);
+      });
     }
 
-    items.forEach((item) => {
-      const el = document.createElement('div');
-      el.className = 'directive';
-      const kind = document.createElement('em');
-      kind.textContent = item.scope === 'audience_message' ? 'Chat' : item.scope === 'persistent' ? 'Persistent' : 'One scene';
-      const timing = document.createElement('em');
-      timing.textContent = item.first_applied_scene
-        ? `since scene ${item.first_applied_scene}`
-        : item.delivery === 'after_buffer'
-        ? `from scene ${item.activation_scene}`
-        : 'fast';
-      const words = document.createElement('span');
-      words.textContent = item.text;
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.textContent = '✕';
-      remove.title = 'Remove from future scenes';
-      remove.onclick = () => removeDirective(item.id);
-      el.append(kind, timing, words, remove);
-      root.appendChild(el);
+    $('btnSendChat')?.addEventListener('click', sendDirectFromChat);
+    $('chatInput')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendDirectFromChat();
+      }
     });
-
-    const scheduled = items
-      .filter((item) => item.delivery === 'after_buffer' && !item.first_applied_scene)
-      .map((item) => Number(item.activation_scene || 0))
-      .filter(Boolean);
-    const delayed = state?.metrics?.live_steering_legacy_delay_through_scene;
-    const revised = state?.metrics?.last_live_steering_scene;
-
-    $('liveEffect').textContent = scheduled.length
-      ? `Non-disruptive input queued from scene ${Math.min(
-          ...scheduled
-        )}. Existing plans, speech preparation, and rendering continue unchanged.`
-      : delayed
-      ? `This older saved buffer has no rollback checkpoint. The input will take effect after scene ${delayed}.`
-      : revised
-      ? `Fast steering rebuilt speculative planning from scene ${revised}. Visual rendering was kept intact.`
-      : 'Default input waits behind the planned buffer and does not cancel work.';
   }
 
-  async function submitDirective() {
+  async function sendDirectFromChat() {
     if (!activeId || directiveRequestInFlight) return;
-    const text = $('liveText').value.trim();
-    if (!text) {
-      toast('Enter a message or direction');
-      return;
-    }
-    const button = $('liveSend');
-    const delivery = $('liveDelivery').value;
-    const scope = $('liveScope').value;
+    const input = $('chatInput');
+    const text = (input?.value || '').trim();
+    if (!text) return;
 
     directiveRequestInFlight = true;
-    button.disabled = true;
-
     try {
       const r = await fetch(`/api/theater/${activeId}/directives`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, scope, delivery }),
+        body: JSON.stringify({ text, scope: 'next_scene', delivery: 'after_buffer' }),
       });
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'Could not send input');
-      $('liveText').value = '';
+      if (!r.ok) throw new Error(data.error || 'Could not send directive');
+      input.value = '';
       renderState(data);
-      toast(
-        delivery === 'after_buffer'
-          ? scope === 'audience_message'
-            ? 'Chat queued without replacing planned work'
-            : 'Direction queued without replacing planned work'
-          : 'Fast input queued for unrendered scene'
-      );
+      toast('Direction queued for upcoming scene');
     } catch (e) {
       toast(e.message);
     } finally {
       directiveRequestInFlight = false;
-      button.disabled = !activeId;
     }
   }
 
-  async function removeDirective(id) {
-    if (!activeId) return;
+  async function renderSavedSessions() {
+    const body = $('sidebarBody');
+    body.innerHTML = '<div style="color:var(--yt-text-secondary);padding:16px;text-align:center;">Loading saved streams…</div>';
+
     try {
-      const r = await fetch(`/api/theater/${activeId}/directives/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'Could not remove the rule');
-      renderState(data);
-      toast('Removed from future unrendered scenes');
-    } catch (e) {
-      toast(e.message);
+      const { sessions } = await (await fetch('/api/theater')).json();
+      body.innerHTML = '';
+      if (!sessions || !sessions.length) {
+        body.innerHTML = '<div style="color:var(--yt-text-secondary);padding:16px;text-align:center;">No saved streams yet.</div>';
+        return;
+      }
+      sessions.slice(0, 15).forEach((s) => {
+        const card = document.createElement('div');
+        card.className = 'yt-video-card';
+        card.innerHTML = `
+          <div class="yt-thumb-box">
+            <span class="yt-thumb-scene-num">▶</span>
+            <span class="yt-thumb-duration">${fmt(s.total_duration)}</span>
+          </div>
+          <div class="yt-video-meta">
+            <div class="yt-video-title">${esc(s.title || s.config.prompt)}</div>
+            <div class="yt-video-channel">${(s.segments || []).length} scenes · ${s.status}</div>
+            <div class="yt-video-stats">Saved Stream</div>
+          </div>
+        `;
+        card.onclick = () => poll(s.id);
+        body.appendChild(card);
+      });
+    } catch {
+      body.innerHTML = '<div style="color:var(--yt-text-secondary);padding:16px;text-align:center;">Could not load saved streams.</div>';
     }
   }
 
+  // --------------------------------------------------------------------------
+  // State Polling & Updates
+  // --------------------------------------------------------------------------
   function renderState(next) {
     state = next;
     activeId = next.id;
-    syncLiveExperience(next.config?.mode);
     localStorage.setItem('wanTheaterSession', activeId);
 
-    $('stop').disabled = !['starting', 'planning', 'generating', 'narrating', 'buffering', 'running'].includes(next.status);
-    $('continueStory').hidden = !['interrupted', 'stopped', 'failed'].includes(next.status);
-    $('start').disabled = !$('stop').disabled;
-    $('deskTitle').textContent = next.title || 'Preparing endless story';
+    const isRunning = ['starting', 'planning', 'generating', 'narrating', 'buffering', 'running'].includes(next.status);
+    $('btnStopStream').disabled = !isRunning;
+    $('liveStatusBadge').textContent = isRunning ? 'LIVE' : next.status.toUpperCase();
 
-    const writerMode =
-      next.metrics?.writer_mode === 'gpu_burst'
-        ? 'RTX text-buffer burst'
-        : next.metrics?.writer_mode === 'cpu_sustain'
-        ? 'CPU writer + RTX visual worker'
-        : 'local models starting';
-    $('machine').textContent = `${next.status} · ${writerMode}`;
+    $('primaryVideoTitle').textContent = next.title || next.config?.prompt || 'Endless Story';
 
-    $('readyCount').textContent = (next.segments || []).length;
-    $('plannerSpeed').textContent = next.metrics?.planner_tps ? `${next.metrics.planner_tps} tok/s` : 'loading';
-    $('productionTime').textContent = next.metrics?.production_ema ? fmt(next.metrics.production_ema) : 'measuring';
-    $('coverage').textContent = next.metrics?.coverage_ratio ? `${next.metrics.coverage_ratio}×` : 'measuring';
-
-    $('waitTitle').textContent = next.segments?.length < 2 ? 'Building the safe opening buffer' : next.message;
-    $('waitText').textContent =
-      next.segments?.length < 2
-        ? `${next.message} Narration begins after two complete synchronized scenes.`
-        : next.message;
-
-    renderQueue();
-    updateBuffer();
-    renderDirectives();
+    renderSidebar();
 
     if (next.status === 'failed' || next.status === 'interrupted' || next.status === 'stopped') {
-      $('waiting').style.display = 'grid';
-      $('waitTitle').textContent = next.status === 'failed' ? 'The theater needs attention' : 'Saved theater paused';
+      $('playerWaiting').style.display = 'grid';
+      $('waitTitle').textContent = next.status === 'failed' ? 'Stream Paused' : 'Stream Stopped';
       $('waitText').textContent = next.message;
-      $('resumePlay').style.display = next.segments?.length ? 'inline-flex' : 'none';
-      $('start').disabled = false;
       clearTimeout(pollTimer);
-      loadRecent();
       return;
     }
 
@@ -469,168 +472,136 @@
     }
   }
 
-  async function start(event) {
-    event.preventDefault();
-    const quality_settings = {
-      width: Number($('qualityWidth').value),
-      height: Number($('qualityHeight').value),
-      frames: Number($('qualityFrames').value),
-      fps: Number($('qualityFps').value),
-      min_words: Number($('minWords').value),
-      max_words: Number($('maxWords').value),
-      max_slow: Number($('maxSlow').value),
-    };
-    const payload = {
-      prompt: $('prompt').value,
-      learning_focus: $('learning').value,
-      mode: $('mode').value,
-      audience: $('audience').value,
-      language: $('language').value,
-      translation_language: $('translationLanguage').value,
-      voice: $('voice').value,
-      quality_settings,
-      context_compaction_scenes: Number($('contextCompactionScenes').value),
-      seed: Number($('seed').value),
-    };
-
-    $('start').disabled = true;
-    $('waiting').style.display = 'grid';
-    $('waitTitle').textContent = 'Starting the local story engine';
-    $('waitText').textContent =
-      'Gemma first builds a short story buffer and releases the RTX GPU for Wan. No narration plays until its visual is ready.';
-
+  async function stopStream() {
+    if (!activeId) return;
+    $('btnStopStream').disabled = true;
     try {
-      const r = await fetch('/api/theater', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      const r = await fetch(`/api/theater/${activeId}/stop`, { method: 'POST' });
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'Could not start theater.');
-
-      currentIndex = -1;
-      playbackStarted = false;
-      lastSegmentCount = 0;
+      if (!r.ok) throw new Error(data.error || 'Could not stop stream');
+      players.A.pause();
+      players.B.pause();
       renderState(data);
-      loadRecent();
+      toast('Stream stopped. Complete archive preserved.');
     } catch (e) {
-      $('start').disabled = false;
+      $('btnStopStream').disabled = false;
       toast(e.message);
     }
   }
 
-  async function previewVoice() {
-    const button = $('previewVoice');
-    const sample = $('voiceSample');
-    button.disabled = true;
-    button.textContent = 'Rendering…';
+  async function loadRecent() {
+    if (activeSidebarTab === 'saved') {
+      renderSavedSessions();
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Settings Modal Flyout
+  // --------------------------------------------------------------------------
+  function openSettingsModal() {
+    $('ytSettingsModal')?.classList.add('open');
+  }
+
+  function closeSettingsModal() {
+    $('ytSettingsModal')?.classList.remove('open');
+  }
+
+  async function previewVoiceSample() {
+    const btn = $('btnPreviewVoice');
+    const audio = $('voiceSampleAudio');
+    btn.disabled = true;
+    btn.textContent = 'Rendering…';
 
     try {
       const r = await fetch('/api/theater/voice-preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ voice: $('voice').value, language: $('language').value }),
+        body: JSON.stringify({
+          voice: $('voiceSelect')?.value || 'M1',
+          language: $('languageSelect')?.value || 'en',
+        }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Voice preview failed');
-      sample.src = `${mediaUrl(data.path)}&v=${Date.now()}`;
-      sample.hidden = false;
-      await sample.play();
+      audio.src = `${mediaUrl(data.path)}&v=${Date.now()}`;
+      audio.hidden = false;
+      await audio.play();
     } catch (e) {
       toast(e.message);
     } finally {
-      button.disabled = false;
-      button.textContent = 'Hear voice';
+      btn.disabled = false;
+      btn.textContent = 'Hear Voice';
     }
   }
 
-  async function stop() {
-    if (!activeId) return;
-    $('stop').disabled = true;
-    try {
-      const r = await fetch(`/api/theater/${activeId}/stop`, { method: 'POST' });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'Could not stop');
-      players.A.pause();
-      players.B.pause();
-      renderState(data);
-      toast('The complete stream archive was kept');
-    } catch (e) {
-      $('stop').disabled = false;
-      toast(e.message || 'Could not stop and archive');
-    }
-  }
-
-  async function resumeSession(id) {
-    const r = await fetch(`/api/theater/${id}/resume`, { method: 'POST' });
-    const data = await r.json();
-    if (r.ok) {
-      currentIndex = -1;
-      playbackStarted = false;
-      renderState(data);
-    } else {
-      toast(data.error || 'Could not continue');
-    }
-  }
-
-  async function loadRecent() {
-    try {
-      const { sessions } = await (await fetch('/api/theater')).json();
-      const root = $('recent');
-      root.innerHTML = '';
-      if (!sessions || !sessions.length) {
-        root.innerHTML = '<span class="sub">No sessions yet.</span>';
-        return;
-      }
-      sessions.slice(0, 8).forEach((s) => {
-        const el = document.createElement('div');
-        el.className = 'scene-chip';
-        el.style.display = 'flex';
-        el.style.justifyContent = 'space-between';
-        el.style.alignItems = 'center';
-        el.style.cursor = 'pointer';
-        el.innerHTML = `<div><b>${esc(s.title || s.config.prompt)}</b><small>${s.status} · ${(s.segments || []).length} scenes · ${fmt(
-          s.total_duration
-        )}</small></div><button class="btn-ghost" style="padding:4px 8px;font-size:10px;">Open</button>`;
-        el.onclick = () => poll(s.id);
-        root.appendChild(el);
-      });
-    } catch {}
-  }
-
-  // Initialize UI on Load
+  // --------------------------------------------------------------------------
+  // Initialization
+  // --------------------------------------------------------------------------
   document.addEventListener('DOMContentLoaded', () => {
-    // Initialize YouTube-inspired Draggable Subtitles
-    const captionOverlay = $('captionOverlay');
-    const screenViewport = $('screen');
-    if (captionOverlay && screenViewport && window.SubtitleManager) {
-      subtitleManager = new window.SubtitleManager(captionOverlay, screenViewport);
-      $('captionResetPos')?.addEventListener('click', () => subtitleManager.resetPosition());
+    // Draggable CC Subtitles
+    const captionOverlay = $('ytCaptionWindow');
+    const playerContainer = $('ytPlayerContainer');
+    if (captionOverlay && playerContainer && window.SubtitleManager) {
+      subtitleManager = new window.SubtitleManager(captionOverlay, playerContainer);
+      $('btnResetCaptionPos')?.addEventListener('click', () => subtitleManager.resetPosition());
     }
 
-    $('setup').addEventListener('submit', start);
-    $('mode').addEventListener('change', syncExperienceSetup);
-    $('language').addEventListener('change', syncTranslationLanguages);
-    $('translationLanguage').addEventListener('change', syncTranslationLanguages);
-    $('previewVoice').addEventListener('click', previewVoice);
-    $('liveSend').addEventListener('click', submitDirective);
-    $('liveText').addEventListener('keydown', (event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submitDirective();
-    });
-    $('stop').addEventListener('click', stop);
-    $('continueStory').addEventListener('click', () => resumeSession(activeId));
-    $('resumePlay').addEventListener('click', () => playIndex(Math.max(0, currentIndex)));
-    $('mute').addEventListener('click', () => {
-      userMuted = !userMuted;
-      players.A.muted = userMuted;
-      players.B.muted = userMuted;
-      $('mute').textContent = userMuted ? 'Sound off' : 'Sound on';
-    });
-    $('fullscreen').addEventListener('click', () => $('screen').requestFullscreen?.());
+    // Top Search Story Submission
+    $('ytSearchForm')?.addEventListener('submit', submitStoryPrompt);
 
-    populateTranslationLanguages();
-    syncExperienceSetup();
-    loadRecent();
+    // Player Controls
+    $('btnPlayPause')?.addEventListener('click', togglePlayPause);
+    $('btnNextScene')?.addEventListener('click', () => {
+      if (state?.segments?.[currentIndex + 1]) playIndex(currentIndex + 1);
+    });
+    $('btnMute')?.addEventListener('click', toggleMute);
+    $('btnCc')?.addEventListener('click', toggleCc);
+    $('btnFullscreen')?.addEventListener('click', toggleFullscreen);
+
+    // Action Row
+    $('btnStopStream')?.addEventListener('click', stopStream);
+    $('btnOpenSettings')?.addEventListener('click', openSettingsModal);
+    $('btnCloseSettings')?.addEventListener('click', closeSettingsModal);
+    $('btnPreviewVoice')?.addEventListener('click', previewVoiceSample);
+
+    // Sidebar Tab Switching
+    $('tabScenes')?.addEventListener('click', () => {
+      activeSidebarTab = 'scenes';
+      $('tabScenes').classList.add('active');
+      $('tabChat').classList.remove('active');
+      $('tabSaved').classList.remove('active');
+      renderSidebar();
+    });
+
+    $('tabChat')?.addEventListener('click', () => {
+      activeSidebarTab = 'chat';
+      $('tabChat').classList.add('active');
+      $('tabScenes').classList.remove('active');
+      $('tabSaved').classList.remove('active');
+      renderSidebar();
+    });
+
+    $('tabSaved')?.addEventListener('click', () => {
+      activeSidebarTab = 'saved';
+      $('tabSaved').classList.add('active');
+      $('tabScenes').classList.remove('active');
+      $('tabChat').classList.remove('active');
+      renderSidebar();
+    });
+
+    // Populate Translation Options
+    const langSelect = $('languageSelect');
+    const transSelect = $('transLanguageSelect');
+    if (langSelect && transSelect) {
+      [...langSelect.options].forEach((opt) => {
+        if (opt.value && opt.value !== 'na') {
+          const c = document.createElement('option');
+          c.value = opt.value;
+          c.textContent = opt.textContent;
+          transSelect.appendChild(c);
+        }
+      });
+    }
 
     const remembered = localStorage.getItem('wanTheaterSession');
     if (remembered) poll(remembered);

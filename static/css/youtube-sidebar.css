@@ -1,0 +1,241 @@
+/**
+ * ============================================================================
+ * YOUTUBE SIDEBAR (youtube-sidebar.css)
+ * ============================================================================
+ * Up Next Scene Recommendations, Live Chat / Direction Stream, Filter Chips.
+ * ============================================================================
+ */
+
+.yt-sidebar-header {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--yt-border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.yt-sidebar-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.yt-chip {
+  border: none;
+  background: var(--yt-surface-chip);
+  color: var(--yt-white);
+  padding: 6px 12px;
+  border-radius: var(--yt-radius-sm);
+  font-family: var(--yt-font-family);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--yt-transition-fast), color var(--yt-transition-fast);
+}
+
+.yt-chip:hover {
+  background: var(--yt-surface-chip-hover);
+}
+
+.yt-chip.active {
+  background: var(--yt-surface-chip-active);
+  color: #0f0f0f;
+  font-weight: 600;
+}
+
+/* Sidebar Scrollable Body */
+.yt-sidebar-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.yt-sidebar-body::-webkit-scrollbar {
+  width: 6px;
+}
+.yt-sidebar-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+/* YouTube Video Recommendation Card (Scene Card) */
+.yt-video-card {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 10px;
+  border-radius: var(--yt-radius-sm);
+  padding: 6px;
+  cursor: pointer;
+  transition: background var(--yt-transition-fast);
+  text-decoration: none;
+  color: inherit;
+}
+
+.yt-video-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.yt-video-card.active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.yt-thumb-box {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #1a1a1a;
+  border-radius: var(--yt-radius-sm);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+
+.yt-thumb-scene-num {
+  font-size: 22px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.yt-thumb-duration {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.85);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--yt-font-family);
+}
+
+.yt-video-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.yt-video-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--yt-white);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.yt-video-channel {
+  font-size: 11.5px;
+  color: var(--yt-text-secondary);
+  margin-top: 2px;
+}
+
+.yt-video-stats {
+  font-size: 11px;
+  color: var(--yt-text-muted);
+}
+
+/* YouTube Live Chat / Direct Host View */
+.yt-chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.yt-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.yt-chat-msg {
+  display: flex;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.yt-chat-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--yt-blue);
+  color: #000;
+  font-weight: 700;
+  font-size: 11px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.yt-chat-author {
+  font-weight: 600;
+  color: var(--yt-text-secondary);
+  margin-right: 6px;
+}
+
+.yt-chat-badge {
+  font-size: 9px;
+  text-transform: uppercase;
+  background: rgba(62, 166, 255, 0.15);
+  color: var(--yt-blue);
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-right: 6px;
+  font-weight: 700;
+}
+
+.yt-chat-input-row {
+  padding: 12px;
+  border-top: 1px solid var(--yt-border);
+  background: var(--yt-surface-card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.yt-chat-input {
+  width: 100%;
+  background: var(--yt-bg-base);
+  border: 1px solid var(--yt-border);
+  border-radius: var(--yt-radius-sm);
+  color: var(--yt-white);
+  padding: 8px 10px;
+  font-family: var(--yt-font-family);
+  font-size: 13px;
+  outline: none;
+  resize: none;
+  height: 38px;
+}
+
+.yt-chat-input:focus {
+  border-color: var(--yt-blue);
+}
+
+.yt-chat-send-btn {
+  align-self: flex-end;
+  background: var(--yt-blue);
+  color: #000;
+  border: none;
+  border-radius: var(--yt-radius-sm);
+  padding: 6px 14px;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity var(--yt-transition-fast);
+}
+
+.yt-chat-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

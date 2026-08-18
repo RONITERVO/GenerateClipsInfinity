@@ -1,9 +1,6 @@
 /**
  * ============================================================================
- * YOUTUBE-INSPIRED REAL-TIME DRAGGABLE SUBTITLES (subtitles.js)
- * ============================================================================
- * Provides draggable caption overlay mechanics, boundary clamping,
- * paired bilingual sentence rendering, and position persistence.
+ * YOUTUBE REAL-TIME DRAGGABLE CLOSED CAPTIONS (subtitles.js)
  * ============================================================================
  */
 
@@ -26,8 +23,7 @@ class SubtitleManager {
     if (!this.overlay || !this.container) return;
 
     const onPointerDown = (e) => {
-      // Don't drag if clicking tools or buttons inside caption
-      if (e.target.closest('.caption-tool-btn')) return;
+      if (e.target.closest('.yt-caption-tool-btn')) return;
 
       this.isDragging = true;
       this.overlay.classList.add('dragging');
@@ -40,7 +36,6 @@ class SubtitleManager {
       this.initialLeft = rect.left - containerRect.left;
       this.initialTop = rect.top - containerRect.top;
 
-      // Remove center-transform once user begins dragging
       this.overlay.style.transform = 'none';
       this.overlay.style.bottom = 'auto';
       this.overlay.style.left = `${this.initialLeft}px`;
@@ -62,11 +57,10 @@ class SubtitleManager {
       let newLeft = this.initialLeft + deltaX;
       let newTop = this.initialTop + deltaY;
 
-      // Clamp within video stage viewport
-      const minLeft = 12;
-      const maxLeft = containerRect.width - overlayRect.width - 12;
-      const minTop = 12;
-      const maxTop = containerRect.height - overlayRect.height - 12;
+      const minLeft = 10;
+      const maxLeft = containerRect.width - overlayRect.width - 10;
+      const minTop = 10;
+      const maxTop = containerRect.height - overlayRect.height - 56; // Leave space above bottom controls
 
       newLeft = Math.max(minLeft, Math.min(newLeft, maxLeft));
       newTop = Math.max(minTop, Math.min(newTop, maxTop));
@@ -89,13 +83,11 @@ class SubtitleManager {
       window.removeEventListener('pointerup', onPointerUp);
 
       if (this.currentPosition) {
-        localStorage.setItem('wan_theater_caption_pos', JSON.stringify(this.currentPosition));
+        localStorage.setItem('wan_yt_caption_pos', JSON.stringify(this.currentPosition));
       }
     };
 
     this.overlay.addEventListener('pointerdown', onPointerDown);
-
-    // Reposition on window resize
     window.addEventListener('resize', () => this._clampPosition());
   }
 
@@ -107,10 +99,10 @@ class SubtitleManager {
     let newLeft = this.currentPosition.leftPct * containerRect.width;
     let newTop = this.currentPosition.topPct * containerRect.height;
 
-    const minLeft = 12;
-    const maxLeft = containerRect.width - overlayRect.width - 12;
-    const minTop = 12;
-    const maxTop = containerRect.height - overlayRect.height - 12;
+    const minLeft = 10;
+    const maxLeft = containerRect.width - overlayRect.width - 10;
+    const minTop = 10;
+    const maxTop = containerRect.height - overlayRect.height - 56;
 
     newLeft = Math.max(minLeft, Math.min(newLeft, maxLeft));
     newTop = Math.max(minTop, Math.min(newTop, maxTop));
@@ -123,34 +115,32 @@ class SubtitleManager {
 
   _restorePosition() {
     try {
-      const saved = localStorage.getItem('wan_theater_caption_pos');
+      const saved = localStorage.getItem('wan_yt_caption_pos');
       if (saved) {
         this.currentPosition = JSON.parse(saved);
         setTimeout(() => this._clampPosition(), 100);
       }
-    } catch {
-      // Ignore localStorage errors
-    }
+    } catch {}
   }
 
   resetPosition() {
-    localStorage.removeItem('wan_theater_caption_pos');
+    localStorage.removeItem('wan_yt_caption_pos');
     this.currentPosition = null;
     this.overlay.style.transform = 'translateX(-50%)';
     this.overlay.style.left = '50%';
     this.overlay.style.top = 'auto';
-    this.overlay.style.bottom = '24px';
+    this.overlay.style.bottom = '56px';
   }
 
   render(sceneData) {
-    const body = this.overlay.querySelector('.caption-body');
+    const body = this.overlay.querySelector('.yt-caption-text');
     if (!body) return;
 
     const pairs = Array.isArray(sceneData?.narration_sentences) ? sceneData.narration_sentences : [];
     const isBilingual = Boolean(sceneData?.translation_language && pairs.length);
 
     if (!sceneData || (!sceneData.narration && !pairs.length)) {
-      body.innerHTML = '<em>Listening for next scene narration…</em>';
+      body.textContent = 'Listening for narration…';
       return;
     }
 
@@ -162,28 +152,23 @@ class SubtitleManager {
     body.innerHTML = '';
     pairs.forEach((pair) => {
       const pairDiv = document.createElement('div');
-      pairDiv.className = 'caption-bilingual-pair';
+      pairDiv.className = 'yt-caption-pair';
 
       const originalDiv = document.createElement('div');
-      originalDiv.className = 'caption-original';
+      originalDiv.className = 'yt-caption-original';
       originalDiv.textContent = pair.original || '';
-
       pairDiv.appendChild(originalDiv);
 
       if (pair.translation) {
         const transDiv = document.createElement('div');
-        transDiv.className = 'caption-translation';
-        transDiv.innerHTML = `<span class="caption-badge">Translate</span><span>${this._escapeHtml(pair.translation)}</span>`;
+        transDiv.className = 'yt-caption-translation';
+        transDiv.textContent = pair.translation;
         pairDiv.appendChild(transDiv);
       }
 
       body.appendChild(pairDiv);
     });
   }
-
-  _escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str || '';
-    return div.innerHTML;
-  }
 }
+
+window.SubtitleManager = SubtitleManager;
