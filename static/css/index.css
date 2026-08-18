@@ -1,0 +1,13 @@
+/**
+ * ============================================================================
+ * YOUTUBE THEATER STYLESHEET ENTRYPOINT (index.css)
+ * ============================================================================
+ */
+
+@import url("./tokens.css");
+@import url("./layout.css");
+@import url("./youtube-player.css");
+@import url("./subtitles.css");
+@import url("./youtube-sidebar.css");
+@import url("./components.css");
+@import url("./animations.css");

@@ -177,24 +177,19 @@ def build_prompt(config: dict[str, Any]) -> dict[str, Any]:
             "inputs": {"samples": ["12", 0], "vae": ["13", 0]},
         },
         "15": {
-            "class_type": "CreateVorbisAudio",
+            "class_type": "CreateVideo",
             "inputs": {
-                "sound": "silence",
-                "duration": frames / fps,
-                "sample_rate": 44100,
+                "images": ["14", 0],
+                "fps": float(fps),
             },
         },
         "16": {
             "class_type": "SaveVideo",
             "inputs": {
-                "images": ["14", 0],
-                "audio": ["15", 0],
+                "video": ["15", 0],
                 "filename_prefix": prefix,
-                "fps": fps,
                 "format": "mp4",
-                "pix_fmt": "yuv420p",
-                "crf": 19,
-                "save_output": True,
+                "codec": "auto",
             },
         },
     }
